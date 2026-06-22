@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Your Profile - Malawi Education Books and Vacancies</title>
+  <link rel="icon" type="image/png" href="LOGO.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+
+  <!-- Header Navigation -->
+  <header class="main-header">
+    <div class="container header-container">
+      <a href="index.html" class="brand-link">
+        <img src="LOGO.png" alt="Malawi Education Books and Vacancies" class="brand-logo">
+        <span class="sr-only">Malawi Education Books and Vacancies</span>
+        <span style="font-size: 1.1rem; line-height: 1.2;">Malawi Education</span>
+      </a>
+
+      <nav aria-label="Main navigation">
+        <ul class="nav-links" id="nav-links">
+          <li><a href="index.html" class="nav-link">Home</a></li>
+          <li><a href="books.html" class="nav-link">Books</a></li>
+          <li><a href="videos.html" class="nav-link">Videos</a></li>
+          <li><a href="python.html" class="nav-link">Python Academy</a></li>
+          <li><a href="vacancies.html" class="nav-link">Vacancies</a></li>
+          <li><a href="services.html" class="nav-link">Services</a></li>
+          <li><a href="blog.html" class="nav-link">Blog</a></li>
+          <li><a href="about.html" class="nav-link">About Us</a></li>
+          <li><a href="contact.html" class="nav-link">Contact</a></li>
+        </ul>
+      </nav>
+
+      <div class="header-actions">
+        <button id="theme-toggle-btn" class="theme-toggle-btn" aria-label="Toggle Night Mode">
+          <span>🌙</span>
+        </button>
+        <div id="header-auth-actions"></div>
+        <button class="mobile-menu-btn" id="mobile-menu-btn" aria-label="Toggle navigation drawer">☰</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Profile Dashboard Section -->
+  <main class="container" style="padding-top: 100px;">
+    <div style="margin-bottom: 2rem;">
+      <h1 style="font-size: 2rem; font-weight: 800; letter-spacing: -0.02em;">Student Dashboard</h1>
+      <p style="color: var(--text-secondary);">Manage your educational goals, certificates, and job applications.</p>
+    </div>
+
+    <!-- Multi-Column Layout -->
+    <div class="admin-container">
+      
+      <!-- Left sidebar: User Overview Card -->
+      <aside class="admin-sidebar" style="height: fit-content; text-align: center; padding: 2rem 1.5rem;">
+        <div style="width: 90px; height: 90px; background-color: var(--color-primary); color: #ffffff; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 2.25rem; font-weight: 800; margin: 0 auto 1.5rem; border: 4px solid var(--border-color);" id="user-avatar-initials">
+          ME
+        </div>
+        <h2 id="profile-name-title" style="font-size: 1.25rem; font-weight: 800; margin-bottom: 0.25rem;">Student User</h2>
+        <p id="profile-role-badge" style="display: inline-block; padding: 0.2rem 0.75rem; border-radius: 50px; font-size: 0.75rem; font-weight: 800; text-transform: uppercase; margin-bottom: 1rem;" class="badge-role role-user">user</p>
+        
+        <div style="text-align: left; border-top: 1px solid var(--border-color); padding-top: 1.5rem; margin-top: 1rem; font-size: 0.9rem; color: var(--text-secondary);">
+          <div style="margin-bottom: 0.75rem;">
+            <strong>Email:</strong> <span id="profile-email-text">--</span>
+          </div>
+          <div>
+            <strong>Registered:</strong> <span id="profile-joined-text">--</span>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Right Main Panel: Manage Profile & Achievements -->
+      <section class="admin-content">
+        <!-- Edit Profile Panel -->
+        <div class="card" style="padding: 2rem; margin-bottom: 2rem;">
+          <h2 style="font-size: 1.25rem; font-weight: 800; margin-bottom: 1.5rem; border-bottom: 1px solid var(--border-color); padding-bottom: 0.5rem;">Personal Information</h2>
+          <form id="profile-edit-form">
+            <div class="form-group">
+              <label for="edit-full-name" class="form-label">Full Name</label>
+              <input type="text" id="edit-full-name" class="form-control" required>
+            </div>
+            <div class="form-group">
+              <label for="edit-phone" class="form-label">Phone Number</label>
+              <input type="tel" id="edit-phone" class="form-control" required>
+              <span class="form-help">Ensure you keep your active phone number up to date for vacancy feedback and alerts.</span>
+            </div>
+            <button type="submit" class="btn btn-primary" style="margin-top: 0.5rem;">Save Details</button>
+          </form>
+        </div>
+
+        <!-- Academic & Python Progress Tracking -->
+        <div class="card" style="padding: 2rem; margin-bottom: 2rem;">
+          <h2 style="font-size: 1.25rem; font-weight: 800; margin-bottom: 1.5rem; border-bottom: 1px solid var(--border-color); padding-bottom: 0.5rem;">Python Academy Progress</h2>
+          <div class="academy-progress-wrapper" style="border: none; padding: 0;">
+            <div class="progress-info">
+              <span>Python Core Certification Progress</span>
+              <span id="profile-python-progress-percent">0% Completed</span>
+            </div>
+            <div class="progress-track" style="margin-bottom: 1.5rem;">
+              <div class="progress-fill" id="profile-python-progress-bar" style="width: 0%;"></div>
+            </div>
+          </div>
+          <div id="certificate-claim-area" class="hidden" style="background-color: rgba(22, 163, 74, 0.08); border: 1px dashed var(--color-secondary); padding: 1.5rem; border-radius: var(--border-radius-md); text-align: center; margin-top: 1rem;">
+            <h3 style="color: var(--color-secondary); font-size: 1.1rem; font-weight: 800; margin-bottom: 0.5rem;">Congratulations! You Are Certified!</h3>
+            <p style="font-size: 0.9rem; margin-bottom: 1rem; color: var(--text-secondary);">You have successfully completed all core quizzes in Python Academy.</p>
+            <a href="python.html?action=certificate" class="btn btn-secondary btn-sm">View Certificate</a>
+          </div>
+        </div>
+
+        <!-- Saved Vacancies -->
+        <div class="card" style="padding: 2rem;">
+          <h2 style="font-size: 1.25rem; font-weight: 800; margin-bottom: 1.5rem; border-bottom: 1px solid var(--border-color); padding-bottom: 0.5rem;">Saved Vacancies</h2>
+          <div id="saved-vacancies-list" class="grid-layout" style="margin-top: 0; grid-template-columns: 1fr;">
+            <!-- Rendered dynamically -->
+            <p style="color: var(--text-muted); font-size: 0.95rem;">You haven't saved any vacancies yet. Explore the <a href="vacancies.html" style="font-weight: 700;">Vacancies page</a> to bookmark opportunities.</p>
+          </div>
+        </div>
+
+      </section>
+    </div>
+  </main>
+
+  <!-- Footer -->
+  <footer class="main-footer">
+    <div class="container footer-bottom" style="border-top: none; padding-top: 0;">
+      <p class="footer-copy">&copy; 2026 Malawi Education Books and Vacancies. Official support: <a href="mailto:malawieducationbooksandvacanci@gmail.com" style="color: var(--color-primary);">malawieducationbooksandvacanci@gmail.com</a> | <a href="tel:+265897228943" style="color: var(--color-primary);">+265 89 722 8943</a> | <a href="https://wa.me/265993984344" target="_blank" rel="noopener noreferrer" style="color: var(--color-primary);">WhatsApp</a></p>
+    </div>
+  </footer>
+
+  <!-- Initialization and Dynamic Bindings -->
+  <script src="supabase.js"></script>
+  <script src="app.js"></script>
+  <script src="auth.js"></script>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      // Small timeout to allow Supabase SDK confirmation
+      setTimeout(async () => {
+        if (!window.supabaseClient) {
+          window.showError("Database connection is offline.");
+          return;
+        }
+
+        // Verify active login session, otherwise redirect to login template
+        const { data: { session } } = await window.supabaseClient.auth.getSession();
+        if (!session || !session.user) {
+          window.showError("Access Denied. Redirecting to login...");
+          setTimeout(() => {
+            window.location.href = "login.html";
+          }, 1200);
+          return;
+        }
+
+        const user = session.user;
+
+        // Fetch User profile database entry
+        const profile = await window.getUserProfile(user.id);
+        if (profile) {
+          // Populate profile texts
+          document.getElementById("profile-name-title").textContent = profile.full_name;
+          document.getElementById("profile-email-text").textContent = user.email;
+          
+          // Generate nice avatar initials
+          const nameParts = profile.full_name.split(" ");
+          const initials = nameParts.map(p => p[0]).slice(0, 2).join("").toUpperCase();
+          document.getElementById("user-avatar-initials").textContent = initials || "ST";
+
+          // Format Joined Date
+          if (profile.created_at) {
+            const joinedDate = new Date(profile.created_at).toLocaleDateString("en-US", {
+              year: "numeric",
+              month: "long",
+              day: "numeric"
+            });
+            document.getElementById("profile-joined-text").textContent = joinedDate;
+          }
+
+          // Role indicator setup
+          const roleBadge = document.getElementById("profile-role-badge");
+          roleBadge.textContent = profile.role || "user";
+          roleBadge.className = `badge-role role-${profile.role || "user"}`;
+
+          // Form input values matching database values
+          document.getElementById("edit-full-name").value = profile.full_name || "";
+          document.getElementById("edit-phone").value = profile.phone || "";
+        }
+
+        // Setup Edit Profile submit action handler
+        const profileForm = document.getElementById("profile-edit-form");
+        profileForm.addEventListener("submit", async (e) => {
+          e.preventDefault();
+          const updatedName = document.getElementById("edit-full-name").value.trim();
+          const updatedPhone = document.getElementById("edit-phone").value.trim();
+
+          if (!updatedName || !updatedPhone) {
+            window.showError("Please fill out all fields.");
+            return;
+          }
+
+          const success = await window.updateProfile(user.id, updatedName, updatedPhone);
+          if (success) {
+            document.getElementById("profile-name-title").textContent = updatedName;
+            const initials = updatedName.split(" ").map(p => p[0]).slice(0, 2).join("").toUpperCase();
+            document.getElementById("user-avatar-initials").textContent = initials || "ST";
+          }
+        });
+
+        // Load Python progress tracking and Saved Vacancies
+        loadAcademyProgress(user.id);
+        loadSavedJobs(user.id);
+
+      }, 350);
+    });
+
+    /**
+     * Pull completed quizzes from progress records to update UI tracker
+     */
+    async function loadAcademyProgress(userId) {
+      try {
+        const { data, error } = await window.supabaseClient
+          .from("user_progress")
+          .select("lesson_id, completed")
+          .eq("user_id", userId);
+
+        if (!error && data) {
+          // Say there are 5 core coding lessons total
+          const TOTAL_LESSONS = 5;
+          const completedCount = data.filter(d => d.completed).length;
+          const percentage = Math.min(100, Math.round((completedCount / TOTAL_LESSONS) * 100));
+
+          document.getElementById("profile-python-progress-percent").textContent = `${percentage}% Completed`;
+          document.getElementById("profile-python-progress-bar").style.width = `${percentage}%`;
+
+          if (percentage >= 100) {
+            document.getElementById("certificate-claim-area").classList.remove("hidden");
+          }
+        }
+      } catch (err) {
+        console.warn("Error resolving Academy Progress values:", err);
+      }
+    }
+
+    /**
+     * Fetch saved vacancies from join table
+     */
+    async function loadSavedJobs(userId) {
+      const container = document.getElementById("saved-vacancies-list");
+      if (!container) return;
+
+      try {
+        const { data, error } = await window.supabaseClient
+          .from("saved_vacancies")
+          .select(`
+            id,
+            vacancy_id,
+            vacancies (
+              id,
+              title,
+              company,
+              location,
+              deadline
+            )
+          `)
+          .eq("user_id", userId);
+
+        if (!error && data && data.length > 0) {
+          container.innerHTML = ""; // Clear loader text
+
+          data.forEach(item => {
+            const v = item.vacancies;
+            if (!v) return;
+
+            const card = document.createElement("article");
+            card.className = "card";
+            card.style.flexDirection = "row";
+            card.style.justifyContent = "space-between";
+            card.style.alignItems = "center";
+            card.style.padding = "1rem 1.5rem";
+            card.style.gap = "1rem";
+            
+            card.innerHTML = `
+              <div>
+                <h3 style="font-size: 1.1rem; font-weight: 700; margin-bottom: 0.25rem;">
+                  <a href="vacancies.html?id=${v.id}" style="color: var(--text-primary);">${v.title}</a>
+                </h3>
+                <p style="font-size: 0.85rem; color: var(--text-muted);">${v.company} &bull; ${v.location}</p>
+                <p style="font-size: 0.8rem; color: var(--color-accent); font-weight: 700;">Deadline: ${v.deadline}</p>
+              </div>
+              <button class="btn btn-outline btn-sm" onclick="unsaveVacancy('${item.id}', this)" style="border-color: var(--color-accent); color: var(--color-accent) !important;">Unsave</button>
+            `;
+            container.appendChild(card);
+          });
+        }
+      } catch (err) {
+        console.warn("Could not load bookmarked vacancies:", err);
+      }
+    }
+
+    /**
+     * Global deletion script wrapper for removing saved jobs
+     */
+    window.unsaveVacancy = async function(saveId, btnEl) {
+      if (!window.supabaseClient) return;
+      
+      window.showLoading("Removing bookmarked vacancy...");
+      try {
+        const { error } = await window.supabaseClient
+          .from("saved_vacancies")
+          .delete()
+          .eq("id", saveId);
+
+        if (error) throw error;
+
+        window.showSuccess("Vacancy removed.");
+        btnEl.closest("article").remove();
+        
+        // If empty now, show instructions again
+        const container = document.getElementById("saved-vacancies-list");
+        if (container && container.children.length === 0) {
+          container.innerHTML = `<p style="color: var(--text-muted); font-size: 0.95rem;">You haven't saved any vacancies yet. Explore the <a href="vacancies.html" style="font-weight: 700;">Vacancies page</a> to bookmark opportunities.</p>`;
+        }
+      } catch (err) {
+        window.showError("Failed to remove vacancy bookmark.");
+      } finally {
+        window.hideLoading();
+      }
+    };
+  </script>
+</body>
+</html>

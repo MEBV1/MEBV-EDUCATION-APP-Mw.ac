@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login - Malawi Education Books and Vacancies</title>
+  <link rel="icon" type="image/png" href="LOGO.png">
+  <link rel="stylesheet" href="style.css">
+  <!-- Supabase CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+
+  <!-- Sticky Main Header Navigation -->
+  <header class="main-header">
+    <div class="container header-container">
+      <a href="index.html" class="brand-link">
+        <img src="LOGO.png" alt="Malawi Education Books and Vacancies" class="brand-logo">
+        <span class="sr-only">Malawi Education Books and Vacancies</span>
+        <span style="font-size: 1.1rem; line-height: 1.2;">Malawi Education</span>
+      </a>
+
+      <nav aria-label="Main navigation">
+        <ul class="nav-links" id="nav-links">
+          <li><a href="index.html" class="nav-link">Home</a></li>
+          <li><a href="books.html" class="nav-link">Books</a></li>
+          <li><a href="videos.html" class="nav-link">Videos</a></li>
+          <li><a href="python.html" class="nav-link">Python Academy</a></li>
+          <li><a href="vacancies.html" class="nav-link">Vacancies</a></li>
+          <li><a href="services.html" class="nav-link">Services</a></li>
+          <li><a href="blog.html" class="nav-link">Blog</a></li>
+          <li><a href="about.html" class="nav-link">About Us</a></li>
+          <li><a href="contact.html" class="nav-link">Contact</a></li>
+        </ul>
+      </nav>
+
+      <div class="header-actions">
+        <button id="theme-toggle-btn" class="theme-toggle-btn" aria-label="Toggle Night Mode">
+          <span>🌙</span>
+        </button>
+        <div id="header-auth-actions"></div>
+        <button class="mobile-menu-btn" id="mobile-menu-btn" aria-label="Toggle navigation drawer">☰</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Login Form Wrapper -->
+  <main class="container" style="display: flex; align-items: center; justify-content: center; min-height: 70vh;">
+    <div class="card" style="width: 100%; max-width: 450px; padding: 2.5rem; box-shadow: var(--shadow-xl);">
+      <div style="text-align: center; margin-bottom: 2rem;">
+        <img src="LOGO.png" alt="Platform Logo" style="width: 70px; margin: 0 auto 1rem; border-radius: 50%;">
+        <h1 style="font-size: 1.75rem; font-weight: 800; letter-spacing: -0.02em;">Welcome Back</h1>
+        <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 0.25rem;">Sign in to your Malawi Education account</p>
+      </div>
+
+      <form id="login-form">
+        <div class="form-group">
+          <label for="login-email" class="form-label">Email Address</label>
+          <input type="email" id="login-email" class="form-control" placeholder="yourname@domain.com" required autocomplete="email">
+        </div>
+
+        <div class="form-group" style="position: relative;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+            <label for="login-password" class="form-label" style="margin-bottom: 0;">Password</label>
+            <button type="button" id="forgot-password-link" style="font-size: 0.8rem; font-weight: 700; color: var(--color-primary); cursor: pointer;">Forgot Password?</button>
+          </div>
+          <input type="password" id="login-password" class="form-control" placeholder="••••••••" required autocomplete="current-password">
+        </div>
+
+        <button type="submit" class="btn btn-primary btn-block" style="margin-top: 1.5rem;">Sign In</button>
+      </form>
+
+      <div style="text-align: center; margin-top: 1.5rem; border-top: 1px solid var(--border-color); padding-top: 1.5rem;">
+        <p style="font-size: 0.9rem; color: var(--text-secondary);">
+          Don't have an account? <a href="register.html" style="font-weight: 700; color: var(--color-primary);">Create Account</a>
+        </p>
+      </div>
+    </div>
+  </main>
+
+  <!-- Main Platform Footer -->
+  <footer class="main-footer">
+    <div class="container footer-bottom" style="border-top: none; padding-top: 0;">
+      <p class="footer-copy">&copy; 2026 Malawi Education Books and Vacancies.</p>
+      <div style="display: flex; gap: 1rem;">
+        <a href="about.html" class="footer-link">About</a>
+        <a href="contact.html" class="footer-link">Contact Support</a>
+      </div>
+    </div>
+  </footer>
+
+  <!-- System Scripts -->
+  <script src="supabase.js"></script>
+  <script src="app.js"></script>
+  <script src="auth.js"></script>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      const loginForm = document.getElementById("login-form");
+      const forgotLink = document.getElementById("forgot-password-link");
+
+      // Handle standard email/password login
+      loginForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        
+        const email = document.getElementById("login-email").value.trim();
+        const password = document.getElementById("login-password").value;
+
+        if (!email || !password) {
+          window.showError("Please fill out all fields.");
+          return;
+        }
+
+        const user = await window.signInUser(email, password);
+        if (user) {
+          // Send to index or profile on success
+          setTimeout(() => {
+            window.location.href = "profile.html";
+          }, 800);
+        }
+      });
+
+      // Handle forgot password request flow
+      forgotLink.addEventListener("click", async () => {
+        const emailInput = document.getElementById("login-email").value.trim();
+        
+        if (!emailInput) {
+          window.showError("Please enter your email address in the email field first.");
+          return;
+        }
+
+        // Send reset instructions via auth helper
+        await window.resetPassword(emailInput);
+      });
+    });
+  </script>
+</body>
+</html>
