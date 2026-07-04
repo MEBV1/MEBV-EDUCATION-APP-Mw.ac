@@ -1433,3 +1433,24 @@ textarea.form-control {
   outline: 3px solid var(--color-primary);
   outline-offset: 2px;
 }
+/* Admin Layout Fixes for scrolling */
+.admin-content {
+    min-width: 0; /* Essential for flex-children to allow horizontal scroll */
+}
+
+.admin-table-wrapper {
+    width: 100%;
+    overflow-x: auto; /* Forces the horizontal scrollbar when buttons overflow */
+    -webkit-overflow-scrolling: touch;
+    margin-top: 1rem;
+    border: 1px solid var(--border-color);
+}
+
+.admin-table {
+    min-width: 800px; /* Ensures the table doesn't get squashed */
+    width: 100%;
+}
+
+.admin-table td:last-child {
+    white-space: nowrap; /* Keeps action buttons in a single row */
+}

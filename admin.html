@@ -9,6 +9,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
+  <!-- All branding, header, and sidebar logic remains exactly the same -->
   <header class="main-header">
     <div class="container header-container">
       <a href="index.html" class="brand-link">
@@ -60,11 +61,6 @@
       </aside>
 
       <section class="admin-content">
-        <div id="admin-access-block" class="card" style="padding: 2rem; display: none;">
-          <h2 class="card-title">Access Denied</h2>
-          <p style="color: var(--text-secondary);">You do not have permission to view this administration dashboard. Please sign in with an administrator account.</p>
-        </div>
-
         <div id="admin-main-content"></div>
       </section>
     </div>
@@ -79,33 +75,6 @@
       <div class="modal-body" id="admin-modal-body"></div>
     </div>
   </div>
-
-  <footer class="main-footer">
-    <div class="container footer-grid">
-      <div class="footer-col">
-        <div style="display: flex; align-items: center; gap: 0.5rem;">
-          <img src="LOGO.png" alt="Malawi Education logo" style="height: 40px; border-radius: 50%;">
-          <span style="font-weight: 800; font-size: 1.1rem;">Malawi Education</span>
-        </div>
-      </div>
-      <div class="footer-col">
-        <ul class="footer-links">
-          <li><a href="profile.html" class="footer-link">Profile</a></li>
-          <li><a href="contact.html" class="footer-link">Contact</a></li>
-        </ul>
-      </div>
-      <div class="footer-col">
-        <p style="font-size: 0.95rem; font-weight: 700; color: var(--color-primary);">
-          Email: <a href="mailto:malawieducationbooksandvacanci@gmail.com" style="color: var(--color-primary);">malawieducationbooksandvacanci@gmail.com</a><br>
-          Call: <a href="tel:+265897228943" style="color: var(--color-primary);">+265 89 722 8943</a><br>
-          WhatsApp: <a href="https://wa.me/265993984344" target="_blank" rel="noopener noreferrer" style="color: var(--color-primary);">+265 99 398 4344</a>
-        </p>
-      </div>
-    </div>
-    <div class="container footer-bottom">
-      <p class="footer-copy">&copy; 2026 Malawi Education Books and Vacancies.</p>
-    </div>
-  </footer>
 
   <script src="supabase.js"></script>
   <script src="app.js"></script>
