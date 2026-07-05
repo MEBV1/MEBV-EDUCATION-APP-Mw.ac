@@ -97,3 +97,38 @@ window.convertGoogleDriveLink = convertGoogleDriveLink;
   }, 1000);
   */
 })();
+/**
+ * RESILIENT INITIALIZATION GUARD
+ * Periodically checks for the Supabase SDK if it wasn't ready on page load.
+ */
+(function initializeSupabaseResiliently() {
+    const initClient = () => {
+        if (typeof window.supabase !== 'undefined' && !window.supabaseClient) {
+            try {
+                const client = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+                window.supabaseClient = client;
+                console.log("Supabase Client initialized successfully.");
+                // Dispatch a global event so other files know it's safe to query
+                window.dispatchEvent(new CustomEvent('supabaseReady'));
+            } catch (err) {
+                console.error("Critical: Initialization error:", err);
+            }
+        }
+    };
+
+    // Attempt 1: Immediate
+    initClient();
+
+    // Attempt 2: If failed, poll every 50ms for up to 5 seconds
+    if (!window.supabaseClient) {
+        let attempts = 0;
+        const interval = setInterval(() => {
+            attempts++;
+            initClient();
+            if (window.supabaseClient || attempts > 100) {
+                clearInterval(interval);
+                if (!window.supabaseClient) console.error("Supabase SDK failed to load after timeout.");
+            }
+        }, 50);
+    }
+})();

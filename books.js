@@ -228,3 +228,134 @@ window.fetchBooks = fetchBooks;
 window.fetchBookDetails = fetchBookDetails;
 window.trackDownload = trackDownload;
 window.submitReview = submitReview;
+/* --- DYNAMIC RENDERING OVERRIDES: APPLIES TO ALL OLD & NEW DATA --- */
+
+/**
+ * Intelligent Cover Extractor.
+ * Runs instantly during UI rendering. It checks if an existing book 
+ * has a G-Drive link and pulls a High-Res (1000px) thumbnail 
+ * for the first page regardless of how long ago it was uploaded.
+ */
+function getProfessionalPreview(book) {
+  const gLink = book.download_url || "";
+  const fileIdMatch = gLink.match(/[-\w]{25,}/);
+  
+  if (fileIdMatch) {
+    // Force native high-quality thumbnail (1000px width)
+    return `https://drive.google.com/thumbnail?id=${fileIdMatch[0]}&sz=w1000`;
+  }
+  // Use existing cover if specifically provided, else site logo
+  return book.cover_url || 'LOGO.png';
+}
+
+/**
+ * Handle card download events with direct integration to analytics.
+ */
+window.executeQuickDownload = function(event, bookId, downloadUrl) {
+    if(event) event.stopPropagation(); // Stop details modal from opening
+    if (!downloadUrl || downloadUrl === "#") {
+        window.showToast("File link not found", "error");
+        return;
+    }
+    window.showToast("Preparing your file...", "success");
+    // Directly invoke your existing counter and analytics logic
+    window.trackDownload(bookId);
+    window.open(downloadUrl, '_blank');
+};
+
+/**
+ * Generic star rendering utility to fix inconsistencies in the list
+ */
+function renderDynamicStars(val) {
+    const r = Math.round(val || 0);
+    return Array.from({length: 5}).map((_, i) => i < r ? '★' : '☆').join('');
+}
+/**
+ * DATABASE INITIALIZATION WRAPPER
+ * Prevents premature calls to .from() before client creation.
+ */
+async function safeExecute(task) {
+    if (window.supabaseClient) {
+        return task();
+    }
+    return new Promise((resolve) => {
+        window.addEventListener('supabaseReady', async () => {
+            const result = await task();
+            resolve(result);
+        }, { once: true });
+    });
+}
+
+// Override global fetch functions to wait for initialization automatically
+const originalFetchBooks = window.fetchBooks;
+window.fetchBooks = function(...args) {
+    return safeExecute(() => originalFetchBooks(...args));
+};
+
+const originalLoadBooks = window.loadBooks;
+window.loadBooks = function(...args) {
+    return safeExecute(() => originalLoadBooks(...args));
+};
+/**
+ * RE-IMPLEMENTATION: Atomic Download Tracker with Cooldown
+ * This replaces the previous trackDownload behavior with professional-grade accuracy.
+ */
+(function() {
+    // Persistent memory to handle the 5-second per-book cooldown
+    const activeCooldowns = new Set();
+
+    window.trackDownload = async function(bookId) {
+        if (!bookId || !window.supabaseClient) return;
+
+        // 1. Check for Duplicate Counting (5-second logic)
+        if (activeCooldowns.has(bookId)) {
+            console.log("[Analytics] Cooldown active for book:", bookId);
+            return; 
+        }
+
+        // Add to cooldown set
+        activeCooldowns.add(bookId);
+        setTimeout(() => activeCooldowns.delete(bookId), 5000);
+
+        try {
+            // Get user if logged in
+            const { data: { session } } = await window.supabaseClient.auth.getSession();
+            const userId = session?.user?.id || null;
+
+            // 2. Perform ATOMIC update on server side
+            const { error } = await window.supabaseClient.rpc('increment_book_download_atomic', {
+                target_book_id: bookId,
+                current_user_id: userId
+            });
+
+            if (error) throw error;
+
+            // 3. IMMEDIATE UI UPDATE (No refresh)
+            // This selects all elements displaying downloads for this book ID
+            const uiSelectors = [
+                `#book-downloads-${bookId}`,             // Matches old cards
+                `[data-download-count-for="${bookId}"]`   // Universal data attribute
+            ];
+
+            uiSelectors.forEach(selector => {
+                const elements = document.querySelectorAll(selector);
+                elements.forEach(el => {
+                    let currentVal = parseInt(el.textContent.replace(/[^0-9]/g, "")) || 0;
+                    // Directly increment by exactly 1
+                    const newVal = currentVal + 1;
+                    
+                    // Update text while preserving strings like " Downloads" or " DLs"
+                    if (el.classList.contains('mebv-counts')) {
+                        el.textContent = `${newVal} Downloads`;
+                    } else {
+                        el.textContent = newVal;
+                    }
+                });
+            });
+
+        } catch (err) {
+            console.error("[Analytics Error] Download count failed:", err);
+            // Optional: Show error only if it's a real failure, not just a block
+        }
+    };
+})();

@@ -1454,3 +1454,83 @@ textarea.form-control {
 .admin-table td:last-child {
     white-space: nowrap; /* Keeps action buttons in a single row */
 }
+/* --- BOOK SECTION ENHANCEMENT: OVERRIDE EXISTING DESIGN --- */
+
+/* Fix the card shape and adds high-quality animations */
+.card {
+  transition: transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.4s ease !important;
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100% !important;
+  border-radius: var(--border-radius-lg) !important;
+}
+
+/* Float Lift and Deep Shadow on hover */
+.card:hover {
+  transform: translateY(-12px) scale(1.02) !important;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25) !important;
+  z-index: 10;
+}
+
+/* Force Portrait Book Aspect Ratio & Containment (Full Page Visible) */
+.card-img-wrapper {
+  padding-top: 145% !important; /* Proper book cover proportions */
+  background: #ebeef5 !important; /* Clean gray contrast for margins */
+  position: relative !important;
+  overflow: hidden !important;
+}
+
+/* Displays the ENTIRE first page (Full width/height) without cropping */
+.card-img {
+  object-fit: contain !important; 
+  padding: 0.75rem !important; /* Small framing effect */
+  background-color: #ffffff !important; /* Inner white background like paper */
+}
+
+.card:hover .card-img {
+  transform: scale(1.08) !important;
+}
+
+/* Content adjustment for double buttons */
+.card-content {
+  display: flex !important;
+  flex-direction: column !important;
+  flex-grow: 1 !important;
+  padding: 1.25rem !important;
+}
+
+/* Add specialized Grid for Details and Download buttons */
+.mebv-card-footer {
+  display: grid !important;
+  grid-template-columns: 1fr 1fr !important;
+  gap: 10px !important;
+  margin-top: auto !important;
+  padding-top: 1rem !important;
+  border-top: 1px solid var(--border-color) !important;
+}
+
+/* Star rating and count row layout */
+.mebv-meta-row {
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  margin-bottom: 12px !important;
+}
+
+.mebv-stars {
+  color: var(--color-gold) !important;
+  font-size: 0.9rem !important;
+}
+
+.mebv-counts {
+  font-size: 0.75rem !important;
+  color: var(--text-muted) !important;
+  font-weight: 600 !important;
+}
+
+/* Stacks buttons on narrow mobile devices */
+@media (max-width: 400px) {
+  .mebv-card-footer {
+    grid-template-columns: 1fr !important;
+  }
+}

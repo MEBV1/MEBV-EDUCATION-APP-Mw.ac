@@ -397,3 +397,135 @@
   </script>
 </body>
 </html>
+<script>
+/** 
+ * OVERRIDE: Global Re-definitions.
+ * Browsers will prioritize these function definitions over the ones declared 
+ * earlier in the page, ensuring every book card is automatically improved.
+ */
+
+window.renderFeaturedBooks = function(books) {
+    const featuredWrap = document.getElementById("featured-books");
+    if (!featuredWrap) return;
+    featuredWrap.innerHTML = "";
+    
+    if (!books || books.length === 0) {
+        featuredWrap.innerHTML = `<p style="color: var(--text-muted);">Library collection syncing...</p>`;
+        return;
+    }
+
+    books.forEach(book => {
+        const card = document.createElement("article");
+        card.className = "card";
+        const highResCover = getProfessionalPreview(book);
+
+        card.innerHTML = `
+          <div class="card-img-wrapper">
+            <img src="${highResCover}" alt="${escapeHtml(book.title)}" class="card-img" onerror="this.src='LOGO.png'" loading="lazy">
+            <p class="card-badge">Featured</p>
+          </div>
+          <div class="card-content">
+            <h3 class="card-title">${escapeHtml(book.title)}</h3>
+            <p class="card-description" style="margin-bottom:1rem; -webkit-line-clamp: 2;">${escapeHtml(book.author || 'Educational resource')}</p>
+            
+            <div class="mebv-meta-row">
+                <span class="mebv-stars">${renderDynamicStars(book.average_rating)}</span>
+                <span class="mebv-counts">${book.downloads_count || 0} Downloads</span>
+            </div>
+
+            <div class="mebv-card-footer">
+              <button class="btn btn-outline btn-sm" onclick="openBookDetails('${book.id}')">📖 Details</button>
+              <button class="btn btn-primary btn-sm" onclick="executeQuickDownload(event, '${book.id}', '${book.download_url}')">⬇ Download</button>
+            </div>
+          </div>
+        `;
+        featuredWrap.appendChild(card);
+    });
+};
+
+window.renderBooksList = function(books) {
+    const booksList = document.getElementById("books-list");
+    if (!booksList) return;
+    booksList.innerHTML = "";
+    
+    if (!books || books.length === 0) {
+        booksList.innerHTML = `<p style="color: var(--text-muted); font-size: 0.95rem;">No materials matching that criteria.</p>`;
+        return;
+    }
+
+    books.forEach(book => {
+        const card = document.createElement("article");
+        card.className = "card";
+        const highResCover = getProfessionalPreview(book);
+
+        card.innerHTML = `
+          <div class="card-img-wrapper">
+            <img src="${highResCover}" alt="${escapeHtml(book.title)}" class="card-img" onerror="this.src='LOGO.png'" loading="lazy">
+          </div>
+          <div class="card-content">
+            <p class="book-card-meta">${escapeHtml(book.category || 'Books')} &bull; ${escapeHtml(book.author || 'Admin')}</p>
+            <h3 class="card-title">${escapeHtml(book.title)}</h3>
+            
+            <div class="mebv-meta-row">
+                <span class="mebv-stars">${renderDynamicStars(book.average_rating)}</span>
+                <span class="mebv-counts">${book.downloads_count || 0} DLs</span>
+            </div>
+
+            <div class="mebv-card-footer">
+              <button class="btn btn-outline btn-sm" onclick="openBookDetails('${book.id}')">📖 Details</button>
+              <button class="btn btn-primary btn-sm" onclick="executeQuickDownload(event, '${book.id}', '${book.download_url}')">⬇ Download</button>
+            </div>
+          </div>
+        `;
+        booksList.appendChild(card);
+    });
+};
+</script>
+<script>
+/** 
+ * UI OVERRIDE: Link the "Downloads" text to the Atomic Updater
+ * Modifies the template used by renderFeaturedBooks and renderBooksList.
+ */
+(function overrideRendersForDownloads() {
+    const originalFeatured = window.renderFeaturedBooks;
+    const originalList = window.renderBooksList;
+
+    const attachCounterAttribute = (htmlString, bookId) => {
+        // Wraps the count in a span with a detectable data attribute
+        return htmlString.replace(
+            /class="mebv-counts">(\d+)\sDownloads/g, 
+            `class="mebv-counts" data-download-count-for="${bookId}">$1 Downloads`
+        ).replace(
+            /id="book-downloads-(.*?)"/g,
+            `id="book-downloads-$1" data-download-count-for="$1"`
+        );
+    };
+
+    if (typeof originalFeatured === 'function') {
+        window.renderFeaturedBooks = function(books) {
+            originalFeatured(books);
+            // Reinforce specific data IDs onto dynamically created elements
+            document.querySelectorAll('#featured-books .card').forEach((card, index) => {
+                const book = books[index];
+                if(book) {
+                   const countEl = card.querySelector('.mebv-counts');
+                   if(countEl) countEl.setAttribute('data-download-count-for', book.id);
+                }
+            });
+        };
+    }
+
+    if (typeof originalList === 'function') {
+        window.renderBooksList = function(books) {
+            originalList(books);
+            document.querySelectorAll('#books-list .card').forEach((card, index) => {
+                const book = books[index];
+                if(book) {
+                   const countEl = card.querySelector('.mebv-counts');
+                   if(countEl) countEl.setAttribute('data-download-count-for', book.id);
+                }
+            });
+        };
+    }
+})();
+</script>

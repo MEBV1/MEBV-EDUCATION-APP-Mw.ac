@@ -242,3 +242,246 @@ async function deleteAdminRecord(sec, id) {
         loadSectionData(sec); 
     } 
 }
+/**
+ * FORM ENHANCEMENT ENGINE v5.0
+ * Implements professional grouped forms with advanced validation and YouTube automation.
+ */
+
+// Override general content creation UI
+window.showGeneralForm = window.showCreateForm = function(type) {
+    const modal = document.getElementById("admin-modal");
+    const body = document.getElementById("admin-modal-body");
+    const title = document.getElementById("admin-modal-title");
+    title.textContent = "New Content: " + ADMIN_SECTIONS[type];
+    
+    // Automatic Section Layout Logic
+    let html = `<form id="master-admin-form" style="display:grid; gap:1.5rem; max-height: 80vh; overflow-y: auto; padding-right: 0.5rem;">`;
+
+    // Internal UI Switcher
+    if (type === 'books' || type === 'Books') {
+        html += renderBookFormUI();
+    } else if (type === 'videos' || type === 'Videos') {
+        html += renderVideoFormUI();
+    } else if (type === 'lessons' || type === 'Python Lessons') {
+        html += renderPythonFormUI();
+    } else if (type === 'vacancies' || type === 'Vacancies') {
+        html += renderVacancyFormUI();
+    } else if (type === 'services' || type === 'Services') {
+        html += renderServiceFormUI();
+    } else if (type === 'blog' || type === 'Blog Posts') {
+        html += renderBlogFormUI();
+    } else if (type === 'advertisements' || type === 'Advertisements') {
+        html += renderAdFormUI();
+    } else {
+        html += `<div class="form-group"><input name="title" required placeholder="Title" class="form-control"></div>`;
+    }
+
+    html += `
+        <div style="position: sticky; bottom: 0; background: var(--bg-secondary); padding: 1rem 0; display:flex; gap:1rem;">
+            <button type="button" class="btn btn-outline" style="flex:1" onclick="closeAdminModal()">Discard</button>
+            <button type="submit" class="btn btn-primary" style="flex:2">Publish Content</button>
+        </div>
+    </form>`;
+
+    body.innerHTML = html;
+    modal.classList.add("active");
+
+    const form = document.getElementById("master-admin-form");
+    form.onsubmit = async (e) => {
+        e.preventDefault();
+        await handleMasterSubmission(type, new FormData(e.target));
+    };
+};
+
+// ==========================================
+// INDIVIDUAL FORM GENERATORS
+// ==========================================
+
+function renderBookFormUI() {
+    return `
+        <fieldset style="border:none; padding:0; display:grid; gap:1rem;">
+            <legend style="font-weight:800; margin-bottom:0.5rem; color:var(--color-primary);">Basic Info</legend>
+            <input name="title" placeholder="Book Title *" required class="form-control">
+            <input name="author" placeholder="Author Name" class="form-control">
+            <select name="category" class="form-control" required>
+                <option value="">-- Select Level --</option>
+                <option value="Primary">Primary</option><option value="JCE">JCE</option>
+                <option value="MSCE">MSCE</option><option value="Nursing">Nursing</option><option value="Past Papers">Past Papers</option>
+            </select>
+        </fieldset>
+        <fieldset style="border:none; padding:0; display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+            <input name="subject" placeholder="Subject" class="form-control">
+            <input name="educational_level" placeholder="Class/Standard (e.g. Form 1)" class="form-control">
+            <input name="publisher" placeholder="Publisher" class="form-control">
+            <input name="isbn" placeholder="ISBN" class="form-control">
+            <input name="year_published" type="number" placeholder="Year" class="form-control">
+            <input name="edition" placeholder="Edition" class="form-control">
+            <input name="language" placeholder="Language (Default English)" class="form-control">
+        </fieldset>
+        <fieldset style="border:none; padding:0; display:grid; gap:1rem;">
+            <input name="download_url" placeholder="Google Drive Share Link *" required class="form-control">
+            <div style="display:flex; gap:1rem;">
+                <label><input type="checkbox" name="featured"> Featured</label>
+                <label><input type="checkbox" name="is_active" checked> Published</label>
+            </div>
+        </fieldset>`;
+}
+
+function renderVideoFormUI() {
+    return `
+        <input name="title" required placeholder="Lecture Title" class="form-control">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+            <select name="category" class="form-control" required>
+                <option value="Mathematics">Mathematics</option><option value="Science">Science</option>
+                <option value="ICT">ICT</option><option value="Business">Business</option>
+            </select>
+            <input name="subject" placeholder="Subject" class="form-control">
+            <input name="teacher" placeholder="Teacher Name" class="form-control">
+            <input name="educational_level" placeholder="Level" class="form-control">
+        </div>
+        <input name="video_url" required placeholder="YouTube URL (https://www.youtube.com/watch?v=...)" class="form-control">
+        <textarea name="description" placeholder="Topic Description" class="form-control" rows="3"></textarea>
+        <label><input type="checkbox" name="featured"> Pin to Highlights</label>`;
+}
+
+function renderPythonFormUI() {
+    return `
+        <div style="display:grid; grid-template-columns: 80px 1fr; gap:1rem;">
+            <input name="lesson_number" type="number" placeholder="No." class="form-control" required>
+            <input name="title" required placeholder="Lesson Name" class="form-control">
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+            <input name="module" placeholder="Module/Chapter Name" class="form-control">
+            <select name="difficulty" class="form-control"><option>Beginner</option><option>Intermediate</option><option>Advanced</option></select>
+            <input name="duration" placeholder="Estimated Duration" class="form-control">
+            <label><input type="checkbox" name="premium"> Premium Account Needed</label>
+        </div>
+        <input name="video_url" required placeholder="YouTube Video URL" class="form-control">
+        <textarea name="objectives" placeholder="Learning Objectives (One per line)" class="form-control"></textarea>
+        <textarea name="exercise" placeholder="Practical Task / Challenge" class="form-control"></textarea>`;
+}
+
+function renderVacancyFormUI() {
+    return `
+        <input name="title" required placeholder="Position Title" class="form-control">
+        <input name="company" required placeholder="Organization/Institution" class="form-control">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+            <input name="location" placeholder="Work Location" class="form-control">
+            <select name="employment_type" class="form-control">
+                <option>Full-time</option><option>Part-time</option><option>Contract</option><option>NGO Attachment</option>
+            </select>
+            <input name="salary" placeholder="Remuneration / Pay Scale" class="form-control">
+            <input name="deadline" placeholder="Deadline Date" class="form-control">
+        </div>
+        <input name="qualification" placeholder="Min. Qualification Required" class="form-control">
+        <input name="apply_link" placeholder="Direct Link / Website to apply" class="form-control">
+        <input name="contact_email" type="email" placeholder="Application Email" class="form-control">
+        <textarea name="description" placeholder="Full Job Description" class="form-control" rows="5"></textarea>`;
+}
+
+function renderServiceFormUI() {
+    return `
+        <input name="name" required placeholder="Service Name" class="form-control">
+        <input name="category" placeholder="Service Category" class="form-control">
+        <input name="price" placeholder="Fee (MWK / On request)" class="form-control">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+            <input name="contact_phone" placeholder="Phone" class="form-control">
+            <input name="whatsapp_number" placeholder="WhatsApp (e.g. +265...)" class="form-control">
+            <input name="email" placeholder="Inquiry Email" class="form-control">
+            <input name="website" placeholder="Service Website URL" class="form-control">
+        </div>
+        <textarea name="description" required placeholder="Short Summary" class="form-control" rows="2"></textarea>
+        <textarea name="full_description" placeholder="Full Terms and Features" class="form-control" rows="4"></textarea>`;
+}
+
+function renderBlogFormUI() {
+    return `
+        <input name="title" required placeholder="Post Title" class="form-control">
+        <input name="category" placeholder="Category" class="form-control">
+        <input name="author_name" placeholder="Author" class="form-control">
+        <input name="featured_image" placeholder="Image Link" class="form-control">
+        <input name="tags" placeholder="Tags (Separate with commas)" class="form-control">
+        <textarea name="excerpt" placeholder="Short Teaser / Summary" class="form-control" rows="2"></textarea>
+        <textarea name="content" required placeholder="Write Full Content Here..." class="form-control" rows="10"></textarea>`;
+}
+
+function renderAdFormUI() {
+    return `
+        <input name="title" required placeholder="Campaign Header" class="form-control">
+        <input name="company_name" placeholder="Organization" class="form-control">
+        <input name="image_url" placeholder="Ad Image Link (Publicly hosted URL)" class="form-control" required>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+            <input name="link_url" placeholder="Link URL (Website)" class="form-control">
+            <input name="whatsapp_link" placeholder="WhatsApp Chat URL" class="form-control">
+            <input name="phone_number" placeholder="Inquiry Phone" class="form-control">
+            <input name="display_priority" type="number" value="1" placeholder="Display Priority (Rank)" class="form-control">
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.5rem; font-size:0.8rem;">
+            <label>Run Start Date: <input name="start_date" type="date" class="form-control"></label>
+            <label>Expiry Date: <input name="expires_at" type="date" class="form-control"></label>
+        </div>
+        <textarea name="description" placeholder="Ad Message" class="form-control"></textarea>`;
+}
+
+// ==========================================
+// AUTOMATED HANDLERS
+// ==========================================
+
+async function handleMasterSubmission(type, formData) {
+    const table = {
+        'books': 'books', 'videos': 'videos', 'lessons': 'lessons', 
+        'vacancies': 'vacancies', 'services': 'services', 
+        'blog': 'blog_posts', 'advertisements': 'advertisements'
+    }[type.toLowerCase()] || type;
+
+    const data = Object.fromEntries(formData.entries());
+    
+    // Formatted Automatic Fixes
+    if(formData.get("is_active") === null) data.is_active = true;
+    if(formData.get("featured") === null) data.featured = false;
+
+    // VALIDATION RULES
+    if (!data.title && !data.name) return window.showError("Required fields missing");
+
+    // Email validation
+    const emailFields = ["contact_email", "email"];
+    for (let f of emailFields) {
+        if(data[f] && !data[f].match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)) return window.showError(`Invalid email address: ${data[f]}`);
+    }
+
+    // VIDEO / PYTHON: YT AUTOMATION
+    if (data.video_url) {
+        const vidId = (function(url) {
+            const match = url.match(/^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/);
+            return (match && match[2].length === 11) ? match[2] : null;
+        })(data.video_url);
+
+        if (!vidId) return window.showError("Link must be a valid YouTube address.");
+        
+        // Auto-thumbnail and standard storage
+        data.thumbnail_url = `https://img.youtube.com/vi/${vidId}/maxresdefault.jpg`;
+    }
+
+    // BOOKS: G-DRIVE AUTOMATION
+    if (type === 'books') {
+        data.description = "DOWNLOAD BOOKS FOR FREE FROM MEBV PLATFORM";
+        // Native Thumbnail trigger from previous implementation
+        if (typeof window.getSmartCover === 'function') {
+            data.cover_url = window.getSmartCover({download_url: data.download_url});
+        }
+    }
+
+    window.showLoading("Finalizing content and sync...");
+    try {
+        const { error } = await window.supabaseClient.from(table).insert([data]);
+        if (error) throw error;
+        
+        window.showSuccess("Database successfully updated.");
+        closeAdminModal();
+        loadSectionData(type);
+    } catch (err) {
+        window.showError("Submission failed: " + err.message);
+    } finally {
+        window.hideLoading();
+    }
+}

@@ -861,3 +861,24 @@ async function trackAdImpression(adId) {
     if (countEl) countEl.textContent = newVal;
   });
 }
+/**
+ * STARTUP WRAPPER
+ * Forces Global systems to wait for the Supabase Client.
+ */
+function runCoreStartup() {
+    if (!window.supabaseClient) {
+        window.addEventListener('supabaseReady', () => {
+            syncGlobalSessionUI();
+            initFloatingAds();
+            initRealtimeSubscriptions();
+        }, { once: true });
+        return;
+    }
+    // If already exists, run immediately
+    syncGlobalSessionUI();
+    initFloatingAds();
+    initRealtimeSubscriptions();
+}
+
+// Intercept existing DOMContentLoaded logic to use our wrapper
+document.addEventListener("DOMContentLoaded", runCoreStartup);
