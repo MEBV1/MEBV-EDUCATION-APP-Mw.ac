@@ -882,3 +882,140 @@ function runCoreStartup() {
 
 // Intercept existing DOMContentLoaded logic to use our wrapper
 document.addEventListener("DOMContentLoaded", runCoreStartup);
+/**
+ * Smart Refresh Notification System Logic
+ */
+(function MEBV_RefreshSystem() {
+    // Current application hardcoded deployment version (Scenario 2)
+    // Update this string whenever you deploy new website code to trigger Scene 2
+    const CURRENT_DEPLOYMENT_VERSION = "2026.07.01.v1"; 
+    
+    let isModalOpen = false;
+    let refreshLockedUntil = 0; // Epoch for scenario 7
+
+    const injectModal = () => {
+        if (document.getElementById('refresh-overlay')) return;
+        const div = document.createElement('div');
+        div.id = 'refresh-overlay';
+        div.className = 'refresh-modal-overlay';
+        div.innerHTML = `
+            <div class="refresh-modal-box">
+                <h2 class="refresh-modal-title" id="refresh-title">Website Update Check</h2>
+                <p class="refresh-modal-message" id="refresh-message">Update notification details...</p>
+                <div class="refresh-modal-actions">
+                    <button class="btn btn-outline" id="refresh-btn-later">Later</button>
+                    <button class="btn btn-primary" id="refresh-btn-now">✅ Refresh Now</button>
+                </div>
+            </div>`;
+        document.body.appendChild(div);
+        
+        document.getElementById('refresh-btn-now').onclick = doHardRefresh;
+        document.getElementById('refresh-btn-later').onclick = dismissModal;
+    };
+
+    const showNotification = (title, msg) => {
+        // SCENARIO 6/7 check: Don't show if modal is already open in another tab
+        // and only one tab should trigger the popup
+        if (localStorage.getItem('refresh_modal_lock') === 'active') return;
+        
+        injectModal();
+        document.getElementById('refresh-title').textContent = title;
+        document.getElementById('refresh-message').textContent = msg;
+        document.getElementById('refresh-overlay').classList.add('active');
+        
+        localStorage.setItem('refresh_modal_lock', 'active'); // Lock Scenario 6
+        isModalOpen = true;
+    };
+
+    const dismissModal = () => {
+        const overlay = document.getElementById('refresh-overlay');
+        if (overlay) overlay.classList.remove('active');
+        isModalOpen = false;
+        localStorage.removeItem('refresh_modal_lock'); // Scenario 6
+        
+        // RESET 1 HOUR TIMER (Scenario 1 Requirement)
+        startOneHourTimer();
+    };
+
+    const doHardRefresh = () => {
+        localStorage.removeItem('refresh_modal_lock');
+        // Cache busting technique (Scenario 5)
+        const cacheBuster = `?u=${Date.now()}`;
+        window.location.href = window.location.origin + window.location.pathname + cacheBuster + window.location.hash;
+    };
+
+    // SCENARIO 1: One Hour Session Timer
+    const startOneHourTimer = () => {
+        setTimeout(() => {
+            showNotification(
+                "Website Update Check",
+                "You have been using this website for over one hour. Please refresh your browser to ensure you are using the latest version with all recent improvements."
+            );
+        }, 3600000); 
+    };
+
+    // Monitoring Scenarios (2, 3, 4)
+    const monitorChanges = async () => {
+        if (!window.supabaseClient) return;
+        
+        try {
+            // SCENARIO 2, 3 & 4 (Automatic Detection via platform_settings)
+            const { data, error } = await window.supabaseClient
+                .from('platform_settings')
+                .select('*')
+                .eq('id', 'global')
+                .maybeSingle();
+            
+            if (error || !data) return;
+
+            const lastTimestampInBrowser = localStorage.getItem('last_known_content');
+            const lastBuildInBrowser = localStorage.getItem('last_known_build');
+            
+            // Initial/Scenario 4 (Returning Visitor) check
+            if (!lastBuildInBrowser) {
+                localStorage.setItem('last_known_build', CURRENT_DEPLOYMENT_VERSION);
+                localStorage.setItem('last_known_content', data.last_content_update);
+                return;
+            }
+
+            // Scenario 2/4 (Deployment mismatch)
+            if (lastBuildInBrowser !== CURRENT_DEPLOYMENT_VERSION) {
+                localStorage.setItem('last_known_build', CURRENT_DEPLOYMENT_VERSION);
+                showNotification("Website Update available", "A new version of the website is available. Please refresh to enjoy the latest improvements.");
+                return;
+            }
+
+            // Scenario 3 (Admin Published Content Detection)
+            if (lastTimestampInBrowser !== data.last_content_update && !isModalOpen) {
+                localStorage.setItem('last_known_content', data.last_content_update);
+                showNotification("New Content Published", "New content has just been published. Refresh now to see the latest updates.");
+            }
+
+        } catch (e) { console.warn("Refresh Check failed:", e); }
+    };
+
+    // Cross-tab Synchronization Listener (Scenario 6)
+    window.addEventListener('storage', (e) => {
+        if (e.key === 'refresh_modal_lock' && !e.newValue && isModalOpen) {
+            // Other tab refreshed, just sync UI if needed
+            document.getElementById('refresh-overlay').classList.remove('active');
+        }
+    });
+
+    // Start Processes
+    const startCheckSystem = () => {
+        // Start Hour Timer
+        startOneHourTimer();
+        // Check Build Mismatch immediately (Scenario 4)
+        monitorChanges();
+        // Poll for content changes every 30 seconds (Scenario 3 Requirement)
+        setInterval(monitorChanges, 30000); 
+    };
+
+    // Only start once the Supabase setup fix from previous instruction is ready
+    if (window.supabaseClient) {
+        startCheckSystem();
+    } else {
+        window.addEventListener('supabaseReady', startCheckSystem, { once: true });
+    }
+})();
