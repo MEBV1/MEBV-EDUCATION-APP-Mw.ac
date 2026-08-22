@@ -894,7 +894,4 @@ async function handleMasterSubmission(type, formData) {
         form.addEventListener("submit", event => { event.preventDefault(); saveBook(form); });
     };
 
-    // Bypass the legacy window wrapper that used to enrich every book during
-    // section refresh. Extraction must be initiated only by the book form.
-    window.loadSectionData = section => loadSectionData(section);
 })();
