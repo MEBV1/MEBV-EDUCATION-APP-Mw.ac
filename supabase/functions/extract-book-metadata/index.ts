@@ -14,6 +14,14 @@ const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
 const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
 const allowedRoles = ["admin", "super_admin", "content_manager"];
 
+class ExtractionError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -26,6 +34,16 @@ function driveId(url: string) {
   return match?.[1] || url.match(/[-\w]{25,}/)?.[0] || null;
 }
 
+function isGoogleUrl(value: string) {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return hostname === "drive.google.com" || hostname.endsWith(".drive.google.com") ||
+      hostname === "docs.google.com" || hostname.endsWith(".docs.google.com");
+  } catch (_) {
+    return false;
+  }
+}
+
 function clean(value: string) {
   return value.replace(/\u00a0/g, " ").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
 }
@@ -35,7 +53,7 @@ function titleFromFilename(filename: string) {
 }
 
 function authorFrom(text: string) {
-  const patterns: [RegExp, string][] = [
+  const patterns: RegExp[] = [
     /(?:^|\n)\s*by\s+([^\n]{2,120})/i,
     /(?:^|\n)\s*authors?\s*[:\-]\s*([^\n]{2,120})/i,
     /(?:^|\n)\s*written\s+by\s+([^\n]{2,120})/i,
@@ -62,7 +80,7 @@ function subjectFrom(title: string, firstPage: string) {
 
 function levelFrom(title: string, firstPage: string) {
   const source = `${title}\n${firstPage}`;
-  const patterns = [
+  const patterns: [RegExp, string][] = [
     [/\bform\s+one\b/i, "Form 1"], [/\bform\s+two\b/i, "Form 2"],
     [/\bform\s+three\b/i, "Form 3"], [/\bform\s+four\b/i, "Form 4"],
     [/\bf1\b|\bform\s*1\b/i, "Form 1"], [/\bf2\b|\bform\s*2\b/i, "Form 2"],
@@ -154,7 +172,7 @@ async function fetchDocument(sourceUrl: string, fileId: string) {
   let bytes = new Uint8Array(await result.arrayBuffer());
   let contentType = result.headers.get("content-type") || "";
 
-  if (!contentType.toLowerCase().includes("pdf")) {
+  if (!target.extension && !contentType.toLowerCase().includes("pdf")) {
     const html = new TextDecoder().decode(bytes);
     const token = html.match(/confirm=([0-9A-Za-z_]+)&/i)?.[1] || html.match(/name="confirm"\s+value="([^"]+)"/i)?.[1];
     if (token) {
@@ -165,7 +183,10 @@ async function fetchDocument(sourceUrl: string, fileId: string) {
   }
 
   if (!result.ok || bytes.length === 0) {
-    throw new Error("Google Drive did not return a readable public document.");
+    throw new ExtractionError(404, "Google Drive file could not be accessed. Make sure the file is shared appropriately.");
+  }
+  if (contentType.toLowerCase().includes("text/html")) {
+    throw new ExtractionError(404, "Google Drive file could not be accessed. Make sure the file is shared appropriately.");
   }
   let filename = result.headers.get("content-disposition")?.match(/filename="?([^";]+)"?/i)?.[1] || "";
   if (!filename) {
@@ -176,6 +197,7 @@ async function fetchDocument(sourceUrl: string, fileId: string) {
   }
   const extension = extensionOf(filename, contentType, target.extension || extensionFromUrl(sourceUrl));
   const mimeType = contentType.split(";")[0].trim() || "application/octet-stream";
+  if (!extension) throw new ExtractionError(400, "The document type could not be determined from Google Drive.");
   return { bytes, filename, extension, mimeType };
 }
 
@@ -210,7 +232,7 @@ async function zipXmlText(bytes: Uint8Array, names: string[]) {
 async function documentText(bytes: Uint8Array, extension: string) {
   if (extension === "pdf") return pdfText(bytes);
   if (extension === "docx") {
-    const result = await mammoth.extractRawText({ arrayBuffer: bytes.buffer });
+    const result = await mammoth.extractRawText({ arrayBuffer: bytes.buffer as ArrayBuffer });
     const text = clean(result.value || "");
     return { firstPage: text.slice(0, 5000), fullText: text, info: {} };
   }
@@ -220,7 +242,7 @@ async function documentText(bytes: Uint8Array, extension: string) {
   }
   if (extension === "xlsx") {
     const workbook = XLSX.read(bytes, { type: "array" });
-    const text = workbook.SheetNames.map(name => XLSX.utils.sheet_to_csv(workbook.Sheets[name])).join("\n");
+    const text = workbook.SheetNames.map((name: string) => XLSX.utils.sheet_to_csv(workbook.Sheets[name])).join("\n");
     return { firstPage: text.slice(0, 5000), fullText: text, info: {} };
   }
   if (extension === "txt") {
@@ -232,36 +254,33 @@ async function documentText(bytes: Uint8Array, extension: string) {
     return { firstPage: text.slice(0, 5000), fullText: text, info: {} };
   }
   if (["doc", "ppt", "xls"].includes(extension)) {
-    const binaryText = new TextDecoder("latin1").decode(bytes)
-      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, " ");
-    const strings = binaryText.match(/[A-Za-z][A-Za-z0-9 ,.'()&:/-]{3,}/g) || [];
-    const text = clean(strings.join(" "));
-    if (text) return { firstPage: text.slice(0, 5000), fullText: text, info: {} };
-    throw new Error(`Legacy ${extension.toUpperCase()} text could not be extracted. Save the book and add metadata manually.`);
+    throw new ExtractionError(415, `Legacy ${extension.toUpperCase()} files cannot be extracted by this server. Save the book and add metadata manually.`);
   }
-  throw new Error(`Unsupported document type: ${extension || "unknown"}. Save the book and add metadata manually.`);
+  throw new ExtractionError(415, `Unsupported document type: ${extension || "unknown"}. Save the book and add metadata manually.`);
 }
 
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
-  if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
+  if (request.method !== "POST") return json({ success: false, error: "Method not allowed" }, 405);
 
   try {
     const authorization = request.headers.get("Authorization");
-    if (!authorization) return json({ error: "Authentication required" }, 401);
+    if (!authorization) return json({ success: false, error: "Authentication required" }, 401);
 
     const token = authorization.replace(/^Bearer\s+/i, "");
     const client = createClient(supabaseUrl, supabaseAnonKey, { global: { headers: { Authorization: `Bearer ${token}` } } });
     const { data: { user } } = await client.auth.getUser(token);
-    if (!user) return json({ error: "Invalid authentication token" }, 401);
+    if (!user) return json({ success: false, error: "Invalid authentication token" }, 401);
 
     const { data: profile } = await client.from("profiles").select("role").eq("id", user.id).single();
-    if (!profile || !allowedRoles.includes(profile.role)) return json({ error: "Administrator access required" }, 403);
+    if (!profile || !allowedRoles.includes(profile.role)) return json({ success: false, error: "Administrator access required" }, 403);
 
-    const body = await request.json();
-    const downloadUrl = String(body.download_url || "").trim();
-    const fileId = driveId(downloadUrl);
-    if (!fileId) return json({ error: "Enter a valid Google Drive, Docs, Slides, or Sheets link" }, 400);
+    const body = await request.json().catch(() => null);
+    const downloadUrl = String(body?.driveUrl || body?.download_url || "").trim();
+    const fileId = driveId(downloadUrl) || String(body?.fileId || "").trim();
+    if (!downloadUrl || !isGoogleUrl(downloadUrl) || !fileId) {
+      return json({ success: false, error: "Enter a valid Google Drive, Docs, Slides, or Sheets link" }, 400);
+    }
 
     const downloaded = await fetchDocument(downloadUrl, fileId);
     const extracted = await documentText(downloaded.bytes, downloaded.extension);
@@ -269,6 +288,7 @@ Deno.serve(async (request) => {
     const title = titleFromFilename(fileName);
 
     return json({
+      success: true,
       file_id: fileId,
       file_name: fileName,
       mime_type: downloaded.mimeType,
@@ -287,6 +307,8 @@ Deno.serve(async (request) => {
       }
     });
   } catch (error) {
-    return json({ error: error instanceof Error ? error.message : "Book information could not be extracted" }, 400);
+    const status = error instanceof ExtractionError ? error.status : 500;
+    const message = error instanceof Error ? error.message : "Book information could not be extracted";
+    return json({ success: false, error: message }, status);
   }
 });

@@ -633,56 +633,8 @@ async function handleMasterSubmission(type, formData) {
         });
     };
 
-    const previousLoadSectionData = window.loadSectionData;
-    window.loadSectionData = async function (section) {
-        await previousLoadSectionData(section);
-        if (section !== "books") return;
-
-        const { data: records } = await window.supabaseClient.from("books").select("*").order("created_at", { ascending: false });
-        const images = document.querySelectorAll(".admin-table tbody tr img");
-        (records || []).forEach((book, index) => {
-            if (!book.cover_url && book.download_url && images[index]) images[index].src = driveThumbnail(book.download_url);
-        });
-
-        const { data: { session } } = await window.supabaseClient.auth.getSession();
-        if (!session) return;
-
-        for (const book of (records || [])) {
-            if (!book.download_url || book._metadata_checked) continue;
-            const missing = !book.subject || !book.educational_level || !book.publisher ||
-                !book.isbn || !book.year_published || !book.edition || !book.language || !book.cover_url;
-            if (!missing) continue;
-
-            try {
-                const result = await fetch(metadataFunctionUrl, {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        "Authorization": `Bearer ${session.access_token}`
-                    },
-                    body: JSON.stringify({ download_url: book.download_url })
-                });
-                const payload = await result.json();
-                if (!result.ok || !payload.metadata) continue;
-
-                const detected = payload.metadata;
-                const update = {};
-                ["subject", "educational_level", "publisher", "isbn", "year_published", "edition", "language"]
-                    .forEach(field => {
-                        if (!book[field] && detected[field] !== undefined && detected[field] !== "") {
-                            update[field] = detected[field];
-                        }
-                    });
-                if (!book.cover_url && payload.cover_url) update.cover_url = payload.cover_url;
-
-                if (Object.keys(update).length) {
-                    await window.supabaseClient.from("books").update(update).eq("id", book.id);
-                }
-            } catch (error) {
-                console.warn("Existing book enrichment skipped:", error);
-            }
-        }
-    };
+    // Existing books are displayed without background extraction. Metadata is
+    // requested only after the administrator intentionally enters a new link.
 })();
 
 // Multi-format book workflow. This final override preserves the existing admin
@@ -705,6 +657,21 @@ async function handleMasterSubmission(type, formData) {
         return id ? `https://drive.google.com/thumbnail?id=${id}&sz=w1600` : "";
     }
 
+    function fileIdFor(url) {
+        return String(url || "").match(/(?:\/file\/d\/|\/document\/d\/|\/presentation\/d\/|\/spreadsheets\/d\/|[?&]id=)([-\w]{15,})/)?.[1] || "";
+    }
+
+    async function adminAccessToken() {
+        const current = await window.supabaseClient.auth.getSession();
+        const session = current.data.session;
+        if (session?.access_token && (!session.expires_at || session.expires_at * 1000 > Date.now() + 30000)) {
+            return session.access_token;
+        }
+        const refreshed = await window.supabaseClient.auth.refreshSession();
+        if (refreshed.error || !refreshed.data.session) throw new Error("Your administrator session has expired. Please log in again.");
+        return refreshed.data.session.access_token;
+    }
+
     async function readMetadata(form) {
         const link = form.elements.download_url.value.trim();
         const status = form.querySelector("[data-book-extraction-status]");
@@ -719,18 +686,32 @@ async function handleMasterSubmission(type, formData) {
         if (button) button.disabled = true;
 
         try {
-            const { data: { session } } = await window.supabaseClient.auth.getSession();
-            if (!session) throw new Error("Your administrator session has expired.");
+            const accessToken = await adminAccessToken();
             const response = await fetch(endpoint, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
-                    "Authorization": `Bearer ${session.access_token}`
+                    "Authorization": `Bearer ${accessToken}`
                 },
-                body: JSON.stringify({ download_url: link })
+                body: JSON.stringify({
+                    driveUrl: link,
+                    fileId: fileIdFor(link),
+                    level: form.elements.educational_level.value
+                })
             });
             const payload = await response.json();
-            if (!response.ok) throw new Error(payload.error || "Book information could not be read.");
+            if (!response.ok) {
+                const messages = {
+                    400: "The Google Drive link request is invalid.",
+                    401: "Your administrator session is invalid or expired. Please log in again.",
+                    403: "Your account does not have permission to extract book information.",
+                    404: "Google Drive file could not be accessed. Make sure the file is shared appropriately.",
+                    429: "Too many extraction requests. Please wait and try again.",
+                    415: "This document type is not supported for automatic extraction. You can still save the book and enter metadata manually.",
+                    500: "The document server could not extract book information."
+                };
+                throw new Error(messages[response.status] || payload.error || "Book information could not be read.");
+            }
             if (currentRequest !== requestNumber) return;
 
             Object.entries(payload.metadata || {}).forEach(([name, value]) => {
@@ -847,7 +828,10 @@ async function handleMasterSubmission(type, formData) {
         let timer;
         form.querySelector("[data-paste-drive]").addEventListener("click", () => pasteDriveLink(form));
         link.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => readMetadata(form), 450); });
-        link.addEventListener("paste", () => setTimeout(() => readMetadata(form), 0));
         form.addEventListener("submit", event => { event.preventDefault(); saveBook(form); });
     };
+
+    // Bypass the legacy window wrapper that used to enrich every book during
+    // section refresh. Extraction must be initiated only by the book form.
+    window.loadSectionData = section => loadSectionData(section);
 })();

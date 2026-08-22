@@ -19,11 +19,21 @@ document.addEventListener("DOMContentLoaded", () => {
  * Real-time Database Subscriptions
  * Ensures that newly published content appears without manual refresh.
  */
+let publicContentUpdatesChannel = null;
+
 function initRealtimeSubscriptions() {
-  if (!window.supabaseClient) return;
+  if (!window.supabaseClient || publicContentUpdatesChannel) return;
+
+  const existingChannel = typeof window.supabaseClient.getChannels === "function"
+    ? window.supabaseClient.getChannels().find(channel => channel.topic === "realtime:public-content-updates")
+    : null;
+  if (existingChannel) {
+    publicContentUpdatesChannel = existingChannel;
+    return;
+  }
 
   // Listen for changes in key content tables
-  window.supabaseClient
+  publicContentUpdatesChannel = window.supabaseClient
     .channel('public-content-updates')
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'advertisements' }, (payload) => {
       console.log('New advertisement published:', payload.new);
@@ -44,7 +54,11 @@ function initRealtimeSubscriptions() {
         if (typeof window.loadBooks === 'function') window.loadBooks();
       }
     })
-    .subscribe();
+    .subscribe((status) => {
+      if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+        publicContentUpdatesChannel = null;
+      }
+    });
 }
 
 /**
