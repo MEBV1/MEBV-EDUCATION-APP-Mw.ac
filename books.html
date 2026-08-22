@@ -398,6 +398,39 @@
 </body>
 </html>
 <script>
+(function () {
+  function drivePreview(url) {
+    const match = String(url || "").match(/[-\w]{25,}/);
+    return match ? `https://drive.google.com/thumbnail?id=${match[0]}&sz=w1600` : "";
+  }
+
+  async function repairMissingBookPreviews() {
+    if (!window.supabaseClient) return;
+
+    const { data: books } = await window.supabaseClient
+      .from("books")
+      .select("title,download_url,cover_url");
+
+    if (!books) return;
+
+    document.querySelectorAll("#books-list img, #featured-books img, #book-modal-body img").forEach(image => {
+      if (image.src && !image.src.includes("LOGO.png")) return;
+
+      const card = image.closest(".card");
+      const titleElement = card?.querySelector(".card-title") || document.getElementById("book-modal-title");
+      const title = titleElement?.textContent.trim();
+      const book = books.find(item => item.title === title);
+      const preview = drivePreview(book?.download_url);
+
+      if (preview) image.src = preview;
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", repairMissingBookPreviews);
+  new MutationObserver(repairMissingBookPreviews).observe(document.body, { childList: true, subtree: true });
+})();
+</script>
+<script>
 /** 
  * OVERRIDE: Global Re-definitions.
  * Browsers will prioritize these function definitions over the ones declared 

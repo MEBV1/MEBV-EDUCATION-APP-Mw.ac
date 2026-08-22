@@ -485,3 +485,202 @@ async function handleMasterSubmission(type, formData) {
         window.hideLoading();
     }
 }
+
+// Automated Google Drive book workflow. This intentionally overrides only the
+// book form; all other admin forms continue using the existing implementation.
+(function () {
+    const metadataFunctionUrl = `${SUPABASE_URL}/functions/v1/extract-book-metadata`;
+    let extractionSequence = 0;
+
+    function driveThumbnail(url) {
+        const match = String(url || "").match(/[-\w]{25,}/);
+        return match ? `https://drive.google.com/thumbnail?id=${match[0]}&sz=w1600` : "";
+    }
+
+    async function extractBookMetadata(form) {
+        const link = form.elements.download_url.value.trim();
+        if (!link) return;
+
+        const sequence = ++extractionSequence;
+        const status = form.querySelector("[data-book-extraction-status]");
+        const button = form.querySelector("button[type=submit]");
+        status.textContent = "Reading book information...";
+        if (button) button.disabled = true;
+
+        try {
+            const { data: { session } } = await window.supabaseClient.auth.getSession();
+            if (!session) throw new Error("Your administrator session has expired.");
+
+            const result = await fetch(metadataFunctionUrl, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${session.access_token}`
+                },
+                body: JSON.stringify({ download_url: link })
+            });
+            const payload = await result.json();
+            if (!result.ok) throw new Error(payload.error || "Book information could not be read.");
+            if (sequence !== extractionSequence) return;
+
+            const metadata = payload.metadata || {};
+            Object.keys(metadata).forEach(name => {
+                const field = form.elements[name];
+                if (field && metadata[name] !== null && metadata[name] !== undefined && metadata[name] !== "") {
+                    field.value = metadata[name];
+                }
+            });
+
+            form.dataset.coverUrl = payload.cover_url || driveThumbnail(link);
+            const preview = form.querySelector("[data-book-preview]");
+            preview.src = form.dataset.coverUrl;
+            preview.hidden = false;
+            status.textContent = "Book information detected. Review it before saving.";
+        } catch (error) {
+            status.textContent = error.message || "Book information could not be read.";
+        } finally {
+            if (button) button.disabled = false;
+        }
+    }
+
+    function categoryForLevel(level) {
+        const value = String(level || "").toUpperCase();
+        if (value.includes("MSCE") || value.includes("FORM")) return "MSCE";
+        if (value.includes("JCE")) return "JCE";
+        if (value.includes("STANDARD")) return "Primary";
+        return "Other";
+    }
+
+    async function saveBook(form) {
+        const link = form.elements.download_url.value.trim();
+        const title = form.elements.title.value.trim();
+        if (!link) return window.showError("Paste a Google Drive PDF link.");
+        if (!title) return window.showError("Enter a book title before saving.");
+
+        const year = form.elements.year_published.value.trim();
+        const record = {
+            title,
+            author: form.elements.author.value.trim() || "Not specified",
+            category: categoryForLevel(form.elements.educational_level.value),
+            subject: form.elements.subject.value.trim() || null,
+            educational_level: form.elements.educational_level.value.trim() || null,
+            publisher: form.elements.publisher.value.trim() || "Not specified",
+            isbn: form.elements.isbn.value.trim() || "Not specified",
+            year_published: year ? Number(year) : null,
+            edition: form.elements.edition.value.trim() || "Not specified",
+            language: form.elements.language.value.trim() || "English",
+            download_url: link,
+            cover_url: form.dataset.coverUrl || driveThumbnail(link),
+            featured: form.elements.featured.checked,
+            is_active: form.elements.is_active.checked,
+            description: "DOWNLOAD BOOKS FOR FREE FROM MEBV PLATFORM"
+        };
+
+        window.showLoading("Saving to library...");
+        try {
+            const { error } = await window.supabaseClient.from("books").insert([record]);
+            if (error) throw error;
+            window.showSuccess("Book saved successfully.");
+            closeAdminModal();
+            loadSectionData("books");
+        } catch (error) {
+            window.showError("Submission failed: " + error.message);
+        } finally {
+            window.hideLoading();
+        }
+    }
+
+    const previousShowCreateForm = window.showCreateForm;
+    window.showCreateForm = function (type) {
+        if (String(type).toLowerCase() !== "books") return previousShowCreateForm(type);
+
+        const modal = document.getElementById("admin-modal");
+        const body = document.getElementById("admin-modal-body");
+        document.getElementById("admin-modal-title").textContent = "New Book";
+        body.innerHTML = `
+            <form id="automated-book-form" style="display:grid;gap:1rem;max-height:80vh;overflow-y:auto;" data-cover-url="">
+                <input name="title" placeholder="Book Title" class="form-control">
+                <input name="author" placeholder="Author" class="form-control">
+                <input name="subject" placeholder="Subject" class="form-control">
+                <input name="educational_level" placeholder="Class/Standard" class="form-control">
+                <input name="publisher" placeholder="Publisher" class="form-control">
+                <input name="isbn" placeholder="ISBN" class="form-control">
+                <input name="year_published" type="number" min="1000" max="2100" placeholder="Year" class="form-control">
+                <input name="edition" placeholder="Edition" class="form-control">
+                <input name="language" value="English" placeholder="Language" class="form-control">
+                <input name="download_url" required placeholder="Paste Google Drive PDF link" class="form-control">
+                <div data-book-extraction-status aria-live="polite" style="font-size:.85rem;min-height:1.2rem;"></div>
+                <img data-book-preview hidden alt="First page preview" style="width:100%;max-height:360px;object-fit:contain;border:1px solid var(--border-color);">
+                <div style="display:flex;gap:1rem;flex-wrap:wrap;">
+                    <label><input type="checkbox" name="featured"> Featured</label>
+                    <label><input type="checkbox" name="is_active" checked> Active</label>
+                </div>
+                <button class="btn btn-primary" type="submit">Save to Library</button>
+            </form>`;
+        modal.classList.add("active");
+
+        const form = document.getElementById("automated-book-form");
+        const link = form.elements.download_url;
+        let timer;
+        link.addEventListener("input", () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => extractBookMetadata(form), 500);
+        });
+        link.addEventListener("paste", () => setTimeout(() => extractBookMetadata(form), 0));
+        form.addEventListener("submit", event => {
+            event.preventDefault();
+            saveBook(form);
+        });
+    };
+
+    const previousLoadSectionData = window.loadSectionData;
+    window.loadSectionData = async function (section) {
+        await previousLoadSectionData(section);
+        if (section !== "books") return;
+
+        const { data: records } = await window.supabaseClient.from("books").select("*").order("created_at", { ascending: false });
+        const images = document.querySelectorAll(".admin-table tbody tr img");
+        (records || []).forEach((book, index) => {
+            if (!book.cover_url && book.download_url && images[index]) images[index].src = driveThumbnail(book.download_url);
+        });
+
+        const { data: { session } } = await window.supabaseClient.auth.getSession();
+        if (!session) return;
+
+        for (const book of (records || [])) {
+            if (!book.download_url || book._metadata_checked) continue;
+            const missing = !book.subject || !book.educational_level || !book.publisher ||
+                !book.isbn || !book.year_published || !book.edition || !book.language || !book.cover_url;
+            if (!missing) continue;
+
+            try {
+                const result = await fetch(metadataFunctionUrl, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Authorization": `Bearer ${session.access_token}`
+                    },
+                    body: JSON.stringify({ download_url: book.download_url })
+                });
+                const payload = await result.json();
+                if (!result.ok || !payload.metadata) continue;
+
+                const detected = payload.metadata;
+                const update = {};
+                ["subject", "educational_level", "publisher", "isbn", "year_published", "edition", "language"]
+                    .forEach(field => {
+                        if (!book[field] && detected[field] !== undefined && detected[field] !== "") {
+                            update[field] = detected[field];
+                        }
+                    });
+                if (!book.cover_url && payload.cover_url) update.cover_url = payload.cover_url;
+
+                if (Object.keys(update).length) {
+                    await window.supabaseClient.from("books").update(update).eq("id", book.id);
+                }
+            } catch (error) {
+                console.warn("Existing book enrichment skipped:", error);
+            }
+        }
+    };
+})();
