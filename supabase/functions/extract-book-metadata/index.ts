@@ -1,5 +1,8 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { getDocument } from "npm:pdfjs-dist@4.10.38/legacy/build/pdf.mjs";
+import mammoth from "npm:mammoth@1.8.0";
+import * as XLSX from "npm:xlsx@0.18.5";
+import JSZip from "npm:jszip@3.10.1";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -19,7 +22,7 @@ function json(body: unknown, status = 200) {
 }
 
 function driveId(url: string) {
-  const match = url.match(/(?:\/file\/d\/|[?&]id=|\/uc\?export=download&id=)([-\w]{20,})/);
+  const match = url.match(/(?:\/file\/d\/|\/document\/d\/|\/presentation\/d\/|\/spreadsheets\/d\/|[?&]id=|\/uc\?export=download&id=)([-\w]{15,})/);
   return match?.[1] || url.match(/[-\w]{25,}/)?.[0] || null;
 }
 
@@ -28,7 +31,7 @@ function clean(value: string) {
 }
 
 function titleFromFilename(filename: string) {
-  return filename.replace(/\.pdf$/i, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+  return filename.replace(/\.(pdf|docx?|pptx?|xlsx?|txt|rtf)$/i, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function authorFrom(text: string) {
@@ -117,8 +120,36 @@ function languageFrom(text: string) {
   return "English";
 }
 
-async function fetchPdf(fileId: string) {
-  const url = `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`;
+function workspaceExport(url: string, fileId: string) {
+  if (/docs\.google\.com\/document/i.test(url)) return { url: `https://docs.google.com/document/d/${fileId}/export?format=docx`, extension: "docx" };
+  if (/docs\.google\.com\/presentation/i.test(url)) return { url: `https://docs.google.com/presentation/d/${fileId}/export/pptx`, extension: "pptx" };
+  if (/docs\.google\.com\/spreadsheets/i.test(url)) return { url: `https://docs.google.com/spreadsheets/d/${fileId}/export?format=xlsx`, extension: "xlsx" };
+  return { url: `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`, extension: "" };
+}
+
+function extensionOf(filename: string, contentType: string, fallback: string) {
+  const fromName = filename.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+  if (fromName) return fromName;
+  if (contentType.includes("pdf")) return "pdf";
+  if (contentType.includes("wordprocessingml")) return "docx";
+  if (contentType.includes("presentationml")) return "pptx";
+  if (contentType.includes("spreadsheetml")) return "xlsx";
+  if (contentType.includes("text/plain")) return "txt";
+  if (contentType.includes("rtf")) return "rtf";
+  return fallback || "";
+}
+
+function extensionFromUrl(url: string) {
+  try {
+    return new URL(url).pathname.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() || "";
+  } catch (_) {
+    return "";
+  }
+}
+
+async function fetchDocument(sourceUrl: string, fileId: string) {
+  const target = workspaceExport(sourceUrl, fileId);
+  const url = target.url;
   let result = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
   let bytes = new Uint8Array(await result.arrayBuffer());
   let contentType = result.headers.get("content-type") || "";
@@ -133,8 +164,8 @@ async function fetchPdf(fileId: string) {
     }
   }
 
-  if (!result.ok || bytes[0] !== 0x25 || bytes[1] !== 0x50 || bytes[2] !== 0x44 || bytes[3] !== 0x46) {
-    throw new Error("Google Drive did not return a readable public PDF.");
+  if (!result.ok || bytes.length === 0) {
+    throw new Error("Google Drive did not return a readable public document.");
   }
   let filename = result.headers.get("content-disposition")?.match(/filename="?([^";]+)"?/i)?.[1] || "";
   if (!filename) {
@@ -143,7 +174,9 @@ async function fetchPdf(fileId: string) {
       .catch(() => "");
     filename = page.match(/<title>([^<]+?)\s*-\s*Google Drive<\/title>/i)?.[1]?.trim() || "";
   }
-  return { bytes, filename };
+  const extension = extensionOf(filename, contentType, target.extension || extensionFromUrl(sourceUrl));
+  const mimeType = contentType.split(";")[0].trim() || "application/octet-stream";
+  return { bytes, filename, extension, mimeType };
 }
 
 async function pdfText(bytes: Uint8Array) {
@@ -156,6 +189,57 @@ async function pdfText(bytes: Uint8Array) {
   }
   const metadata = await pdf.getMetadata().catch(() => ({ info: {} }));
   return { firstPage: clean(pages[0] || ""), fullText: clean(pages.join("\n")), info: metadata.info || {} };
+}
+
+function stripRtf(value: string) {
+  return clean(value.replace(/\\'[0-9a-f]{2}/gi, " ").replace(/\\[a-z]+\d* ?/gi, "").replace(/[{}]/g, ""));
+}
+
+async function zipXmlText(bytes: Uint8Array, names: string[]) {
+  const zip = await JSZip.loadAsync(bytes);
+  const values: string[] = [];
+  for (const name of names) {
+    const entry = zip.file(name);
+    if (!entry) continue;
+    const xml = await entry.async("text");
+    values.push(clean(xml.replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")));
+  }
+  return values.join("\n");
+}
+
+async function documentText(bytes: Uint8Array, extension: string) {
+  if (extension === "pdf") return pdfText(bytes);
+  if (extension === "docx") {
+    const result = await mammoth.extractRawText({ arrayBuffer: bytes.buffer });
+    const text = clean(result.value || "");
+    return { firstPage: text.slice(0, 5000), fullText: text, info: {} };
+  }
+  if (extension === "pptx") {
+    const text = await zipXmlText(bytes, ["ppt/slides/slide1.xml", "ppt/slides/slide2.xml", "ppt/slides/slide3.xml"]);
+    return { firstPage: text.slice(0, 5000), fullText: text, info: {} };
+  }
+  if (extension === "xlsx") {
+    const workbook = XLSX.read(bytes, { type: "array" });
+    const text = workbook.SheetNames.map(name => XLSX.utils.sheet_to_csv(workbook.Sheets[name])).join("\n");
+    return { firstPage: text.slice(0, 5000), fullText: text, info: {} };
+  }
+  if (extension === "txt") {
+    const text = clean(new TextDecoder().decode(bytes));
+    return { firstPage: text.slice(0, 5000), fullText: text, info: {} };
+  }
+  if (extension === "rtf") {
+    const text = stripRtf(new TextDecoder().decode(bytes));
+    return { firstPage: text.slice(0, 5000), fullText: text, info: {} };
+  }
+  if (["doc", "ppt", "xls"].includes(extension)) {
+    const binaryText = new TextDecoder("latin1").decode(bytes)
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, " ");
+    const strings = binaryText.match(/[A-Za-z][A-Za-z0-9 ,.'()&:/-]{3,}/g) || [];
+    const text = clean(strings.join(" "));
+    if (text) return { firstPage: text.slice(0, 5000), fullText: text, info: {} };
+    throw new Error(`Legacy ${extension.toUpperCase()} text could not be extracted. Save the book and add metadata manually.`);
+  }
+  throw new Error(`Unsupported document type: ${extension || "unknown"}. Save the book and add metadata manually.`);
 }
 
 Deno.serve(async (request) => {
@@ -177,15 +261,18 @@ Deno.serve(async (request) => {
     const body = await request.json();
     const downloadUrl = String(body.download_url || "").trim();
     const fileId = driveId(downloadUrl);
-    if (!fileId) return json({ error: "Enter a valid Google Drive PDF link" }, 400);
+    if (!fileId) return json({ error: "Enter a valid Google Drive, Docs, Slides, or Sheets link" }, 400);
 
-    const downloaded = await fetchPdf(fileId);
-    const extracted = await pdfText(downloaded.bytes);
+    const downloaded = await fetchDocument(downloadUrl, fileId);
+    const extracted = await documentText(downloaded.bytes, downloaded.extension);
     const fileName = downloaded.filename;
     const title = titleFromFilename(fileName);
 
     return json({
       file_id: fileId,
+      file_name: fileName,
+      mime_type: downloaded.mimeType,
+      extension: downloaded.extension,
       cover_url: `https://drive.google.com/thumbnail?id=${encodeURIComponent(fileId)}&sz=w1600`,
       metadata: {
         title: title || "",

@@ -684,3 +684,170 @@ async function handleMasterSubmission(type, formData) {
         }
     };
 })();
+
+// Multi-format book workflow. This final override preserves the existing admin
+// forms while replacing only the books form behavior.
+(function () {
+    const endpoint = `${SUPABASE_URL}/functions/v1/extract-book-metadata`;
+    let requestNumber = 0;
+
+    function looksLikeDocumentLink(value) {
+        try {
+            const url = new URL(value);
+            return /(^|\.)drive\.google\.com$|(^|\.)docs\.google\.com$/.test(url.hostname);
+        } catch (_) {
+            return false;
+        }
+    }
+
+    function previewFor(url) {
+        const id = String(url || "").match(/[-\w]{25,}/)?.[0];
+        return id ? `https://drive.google.com/thumbnail?id=${id}&sz=w1600` : "";
+    }
+
+    async function readMetadata(form) {
+        const link = form.elements.download_url.value.trim();
+        const status = form.querySelector("[data-book-extraction-status]");
+        const button = form.querySelector("button[type=submit]");
+        if (!looksLikeDocumentLink(link)) {
+            status.textContent = "Paste a Google Drive, Docs, Slides, or Sheets link.";
+            return;
+        }
+
+        const currentRequest = ++requestNumber;
+        status.textContent = "Reading book information...";
+        if (button) button.disabled = true;
+
+        try {
+            const { data: { session } } = await window.supabaseClient.auth.getSession();
+            if (!session) throw new Error("Your administrator session has expired.");
+            const response = await fetch(endpoint, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${session.access_token}`
+                },
+                body: JSON.stringify({ download_url: link })
+            });
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.error || "Book information could not be read.");
+            if (currentRequest !== requestNumber) return;
+
+            Object.entries(payload.metadata || {}).forEach(([name, value]) => {
+                const field = form.elements[name];
+                // Educational Level is administrator-controlled and authoritative.
+                if (name !== "educational_level" && field && value !== null && value !== "") field.value = value;
+            });
+            form.dataset.coverUrl = payload.cover_url || previewFor(link);
+            const preview = form.querySelector("[data-book-preview]");
+            preview.src = form.dataset.coverUrl || "";
+            preview.hidden = !form.dataset.coverUrl;
+            status.textContent = `Detected ${payload.extension || "document"} (${payload.mime_type || "unknown type"}). Review before saving.`;
+        } catch (error) {
+            status.textContent = error.message || "Book information could not be read.";
+            form.dataset.extractionFailed = "true";
+        } finally {
+            if (button) button.disabled = false;
+        }
+    }
+
+    async function pasteDriveLink(form) {
+        const status = form.querySelector("[data-book-extraction-status]");
+        try {
+            if (!navigator.clipboard || !navigator.clipboard.readText) throw new Error("Clipboard access is unavailable in this browser.");
+            const value = (await navigator.clipboard.readText()).trim();
+            if (!looksLikeDocumentLink(value)) throw new Error("Clipboard does not contain a Google Drive, Docs, Slides, or Sheets link.");
+            form.elements.download_url.value = value;
+            form.elements.download_url.dispatchEvent(new Event("input", { bubbles: true }));
+        } catch (error) {
+            status.textContent = error.message;
+        }
+    }
+
+    function categoryFor(level) {
+        const value = String(level || "").toUpperCase();
+        if (value.includes("MSCE") || value.includes("FORM")) return "MSCE";
+        if (value.includes("JCE")) return "JCE";
+        if (value.includes("STANDARD")) return "Primary";
+        return "Other";
+    }
+
+    async function saveBook(form) {
+        const link = form.elements.download_url.value.trim();
+        const title = form.elements.title.value.trim() || "Google Drive document";
+        if (!link) return window.showError("Paste a Google Drive document link.");
+
+        const year = form.elements.year_published.value.trim();
+        const record = {
+            title,
+            author: form.elements.author.value.trim() || "Not specified",
+            category: categoryFor(form.elements.educational_level.value),
+            subject: form.elements.subject.value.trim() || null,
+            educational_level: form.elements.educational_level.value.trim() || null,
+            publisher: form.elements.publisher.value.trim() || "Not specified",
+            isbn: form.elements.isbn.value.trim() || "Not specified",
+            year_published: year ? Number(year) : null,
+            edition: form.elements.edition.value.trim() || "Not specified",
+            language: form.elements.language.value.trim() || "English",
+            download_url: link,
+            cover_url: form.dataset.coverUrl || previewFor(link) || null,
+            featured: form.elements.featured.checked,
+            is_active: form.elements.is_active.checked,
+            description: "DOWNLOAD BOOKS FOR FREE FROM MEBV PLATFORM"
+        };
+
+        window.showLoading("Saving to library...");
+        try {
+            const { error } = await window.supabaseClient.from("books").insert([record]);
+            if (error) throw error;
+            const status = form.querySelector("[data-book-extraction-status]");
+            if (form.dataset.extractionFailed === "true") {
+                window.showSuccess("Book saved, but automatic information extraction could not be completed.");
+            } else {
+                window.showSuccess("Book saved successfully.");
+            }
+            closeAdminModal();
+            loadSectionData("books");
+        } catch (error) {
+            window.showError("Submission failed: " + error.message);
+        } finally {
+            window.hideLoading();
+        }
+    }
+
+    const previousBookForm = window.showCreateForm;
+    window.showCreateForm = function (type) {
+        if (String(type).toLowerCase() !== "books") return previousBookForm(type);
+        const modal = document.getElementById("admin-modal");
+        const body = document.getElementById("admin-modal-body");
+        document.getElementById("admin-modal-title").textContent = "New Book";
+        body.innerHTML = `
+            <form id="multi-format-book-form" style="display:grid;gap:1rem;max-height:80vh;overflow-y:auto;" data-cover-url="">
+                <input name="title" placeholder="Book Title" class="form-control">
+                <input name="author" placeholder="Author" class="form-control">
+                <input name="subject" placeholder="Subject" class="form-control">
+                <label>Educational Level<select name="educational_level" class="form-control">
+                    <option value="">Select Educational Level</option><option>Standard 1</option><option>Standard 2</option><option>Standard 3</option><option>Standard 4</option><option>Standard 5</option><option>Standard 6</option><option>Standard 7</option><option>Standard 8</option><option>JCE</option><option>Form 1</option><option>Form 2</option><option>Form 3</option><option>Form 4</option><option>MSCE</option>
+                </select></label>
+                <input name="publisher" placeholder="Publisher" class="form-control">
+                <input name="isbn" placeholder="ISBN" class="form-control">
+                <input name="year_published" type="number" min="1000" max="2100" placeholder="Year" class="form-control">
+                <input name="edition" placeholder="Edition" class="form-control">
+                <input name="language" value="English" placeholder="Language" class="form-control">
+                <label>Google Drive Link<div style="display:flex;gap:.5rem;align-items:center;"><input name="download_url" required placeholder="Paste Google Drive document link" class="form-control"><button type="button" class="btn btn-outline" data-paste-drive title="Read clipboard">📋 Paste Google Drive Link</button></div></label>
+                <div data-book-extraction-status aria-live="polite" style="font-size:.85rem;min-height:1.2rem;"></div>
+                <img data-book-preview hidden alt="Document preview" style="width:100%;max-height:360px;object-fit:contain;border:1px solid var(--border-color);">
+                <div style="display:flex;gap:1rem;flex-wrap:wrap;"><label><input type="checkbox" name="featured"> Featured</label><label><input type="checkbox" name="is_active" checked> Active</label></div>
+                <button class="btn btn-primary" type="submit">Save &amp; Publish</button>
+            </form>`;
+        modal.classList.add("active");
+
+        const form = document.getElementById("multi-format-book-form");
+        const link = form.elements.download_url;
+        let timer;
+        form.querySelector("[data-paste-drive]").addEventListener("click", () => pasteDriveLink(form));
+        link.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => readMetadata(form), 450); });
+        link.addEventListener("paste", () => setTimeout(() => readMetadata(form), 0));
+        form.addEventListener("submit", event => { event.preventDefault(); saveBook(form); });
+    };
+})();
