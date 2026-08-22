@@ -603,6 +603,7 @@ async function syncGlobalSessionUI() {
 
         // Add dynamic logout action listener
         document.getElementById("logout-header-btn").addEventListener("click", async () => {
+          console.info("[AUTH DEBUG] Logout triggered by: header Logout button");
           window.showLoading("Logging out...");
           try {
             await window.supabaseClient.auth.signOut();

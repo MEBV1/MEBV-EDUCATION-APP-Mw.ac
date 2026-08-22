@@ -108,6 +108,7 @@ async function signInUser(email, password) {
 async function signOutUser() {
   if (!window.supabaseClient) return;
 
+  console.info("[AUTH DEBUG] Logout triggered by: manual signOutUser action");
   window.showLoading("Signing out securely...");
   try {
     const { error } = await window.supabaseClient.auth.signOut();

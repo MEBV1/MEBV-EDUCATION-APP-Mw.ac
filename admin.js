@@ -18,22 +18,85 @@ const ADMIN_SECTIONS = {
 // Start logic when DOM is ready
 window.addEventListener("DOMContentLoaded", initAdminDashboard);
 
+let adminAuthStateListenerRegistered = false;
+
+function logAdminSession(session, label = "Session check") {
+    console.info("[AUTH DEBUG] " + label, {
+        userId: session?.user?.id || null,
+        sessionExists: Boolean(session),
+        accessTokenExists: Boolean(session?.access_token),
+        sessionExpires: session?.expires_at ? new Date(session.expires_at * 1000).toISOString() : null
+    });
+}
+
+function waitForAdminSession() {
+    return new Promise(async resolve => {
+        let settled = false;
+        const finish = session => {
+            if (settled) return;
+            settled = true;
+            resolve(session || null);
+        };
+
+        const { data } = await window.supabaseClient.auth.getSession();
+        logAdminSession(data.session, "Session check");
+        if (data.session) return finish(data.session);
+
+        const timeout = setTimeout(() => finish(null), 2500);
+        const { data: subscription } = window.supabaseClient.auth.onAuthStateChange((event, session) => {
+            console.info("[AUTH DEBUG] Auth event:", event);
+            logAdminSession(session, "Auth event session");
+            if (event === "INITIAL_SESSION" || event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
+                clearTimeout(timeout);
+                finish(session);
+            }
+        });
+    });
+}
+
 async function initAdminDashboard() {
-  if (!window.supabaseClient) { window.location.href = "index.html"; return; }
+    if (!window.supabaseClient) {
+        console.warn("[AUTH DEBUG] Logout triggered by: Supabase client unavailable");
+        window.location.href = "index.html";
+        return;
+    }
+
+    if (!adminAuthStateListenerRegistered) {
+        adminAuthStateListenerRegistered = true;
+        window.supabaseClient.auth.onAuthStateChange((event, session) => {
+            console.info("[AUTH DEBUG] Auth event:", event);
+            logAdminSession(session, "Auth state change");
+            if (event === "SIGNED_OUT") console.warn("[AUTH DEBUG] Logout triggered by: Supabase SIGNED_OUT event");
+        });
+    }
+
   try {
-    const { data: { session } } = await window.supabaseClient.auth.getSession();
-    if (!session || !session.user) { window.location.href = "index.html"; return; }
+        const session = await waitForAdminSession();
+        if (!session || !session.user) {
+            console.warn("[AUTH DEBUG] Logout triggered by: no session after initial-session wait");
+            window.showError("Your session could not be restored. Please log in again.");
+            return;
+        }
     
     // Check for admin roles
-    const { data: profile } = await window.supabaseClient.from("profiles").select("role").eq("id", session.user.id).single();
+        const { data: profile, error: profileError } = await window.supabaseClient.from("profiles").select("role").eq("id", session.user.id).single();
+        console.info("[AUTH DEBUG] Admin profile:", { userId: session.user.id, profile, error: profileError?.message || null });
+        if (profileError) {
+                window.showError("Admin profile check failed: " + profileError.message);
+                return;
+        }
     if (!profile || !["admin", "super_admin", "content_manager"].includes(profile.role)) {
+                console.warn("[AUTH DEBUG] Logout triggered by: authenticated user lacks an admin role", { userId: session.user.id });
         window.location.href = "index.html";
         return;
     }
 
     setupAdminNavigation();
     loadSectionData("overview");
-  } catch (error) { window.location.href = "index.html"; }
+    } catch (error) {
+        console.error("[AUTH DEBUG] Admin initialization failed:", error);
+        window.showError("Admin authentication check failed: " + (error.message || "unknown error"));
+    }
 }
 
 /**

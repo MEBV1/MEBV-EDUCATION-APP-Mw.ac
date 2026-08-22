@@ -9,7 +9,13 @@ let supabaseClientInstance;
 try {
   if (typeof window.supabase !== 'undefined') {
     // If supabase CDN script is loaded, initialize client
-    supabaseClientInstance = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    supabaseClientInstance = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true
+      }
+    });
     window.supabaseClient = supabaseClientInstance;
   } else {
     console.error("Supabase SDK script is missing. Please ensure the CDN script is loaded in your HTML.");
@@ -105,7 +111,13 @@ window.convertGoogleDriveLink = convertGoogleDriveLink;
     const initClient = () => {
         if (typeof window.supabase !== 'undefined' && !window.supabaseClient) {
             try {
-                const client = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+                const client = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+                  auth: {
+                    persistSession: true,
+                    autoRefreshToken: true,
+                    detectSessionInUrl: true
+                  }
+                });
                 window.supabaseClient = client;
                 console.log("Supabase Client initialized successfully.");
                 // Dispatch a global event so other files know it's safe to query
