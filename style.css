@@ -1487,6 +1487,14 @@ textarea.form-control {
   background-color: #ffffff !important; /* Inner white background like paper */
 }
 
+.book-cover-image {
+  object-fit: contain !important;
+}
+
+.card:hover .book-cover-image {
+  transform: none !important;
+}
+
 .card:hover .card-img {
   transform: scale(1.08) !important;
 }

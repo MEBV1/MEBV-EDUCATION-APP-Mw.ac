@@ -230,23 +230,18 @@ window.trackDownload = trackDownload;
 window.submitReview = submitReview;
 /* --- DYNAMIC RENDERING OVERRIDES: APPLIES TO ALL OLD & NEW DATA --- */
 
-/**
- * Intelligent Cover Extractor.
- * Runs instantly during UI rendering. It checks if an existing book 
- * has a G-Drive link and pulls a High-Res (1000px) thumbnail 
- * for the first page regardless of how long ago it was uploaded.
- */
+const unavailableBookPreview = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1000" viewBox="0 0 720 1000"><rect width="720" height="1000" fill="#eef1f5"/><rect x="42" y="42" width="636" height="916" rx="18" fill="#f8fafc" stroke="#cbd5e1" stroke-width="4"/><text x="360" y="490" text-anchor="middle" font-family="Arial,sans-serif" font-size="34" fill="#64748b">Preview unavailable</text></svg>'
+)}`;
+
 function getProfessionalPreview(book) {
-  const gLink = book.download_url || "";
-  const fileIdMatch = gLink.match(/[-\w]{25,}/);
-  
-  if (fileIdMatch) {
-    // Force native high-quality thumbnail (1000px width)
-    return `https://drive.google.com/thumbnail?id=${fileIdMatch[0]}&sz=w1000`;
+  const coverUrl = String(book?.cover_url || "").trim();
+  if (!coverUrl || /(?:^|\/)LOGO\.png(?:$|[?#])/i.test(coverUrl) || /drive\.google\.com\/thumbnail\?/i.test(coverUrl)) {
+    return unavailableBookPreview;
   }
-  // Use existing cover if specifically provided, else site logo
-  return book.cover_url || 'LOGO.png';
+  return coverUrl.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+window.getBookCoverPreview = getProfessionalPreview;
 
 /**
  * Handle card download events with direct integration to analytics.
