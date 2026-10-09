@@ -13,7 +13,7 @@ import warnings
 from pathlib import Path
 
 from ebooklib import ITEM_DOCUMENT, ITEM_IMAGE, epub
-from fastapi import FastAPI, File, Header
+from fastapi import FastAPI, HTTPException, File, Header, UploadFile
 from fastapi.responses import JSONResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
 import pytesseract
