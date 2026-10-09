@@ -1,0 +1,8 @@
+beautifulsoup4==4.12.3
+EbookLib==0.18
+fastapi==0.115.0
+Pillow==10.4.0
+python-multipart==0.0.9
+pytesseract==0.3.13
+uvicorn[standard]==0.30.6
+WeasyPrint==62.3
