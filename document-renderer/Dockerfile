@@ -1,39 +1,20 @@
+
 FROM python:3.12-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
-RUN apt-get update 
-&& apt-get install -y --no-install-recommends 
-libreoffice-writer 
-libreoffice-impress 
-libreoffice-calc 
-poppler-utils 
-tesseract-ocr 
-tesseract-ocr-eng 
-libpango-1.0-0 
-libpangoft2-1.0-0 
-libharfbuzz0b 
-libjpeg62-turbo 
-libffi8 
-shared-mime-info 
-&& rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends libreoffice-writer libreoffice-impress libreoffice-calc poppler-utils tesseract-ocr tesseract-ocr-eng libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b libjpeg62-turbo libffi8 shared-mime-info && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt /app/requirements.txt
 
-COPY app.py .
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-RUN set -eux; 
-if ! getent group renderer >/dev/null; then 
-groupadd --system renderer; 
-fi; 
-if ! id renderer >/dev/null 2>&1; then 
-useradd --system --gid renderer --home-dir /home/renderer renderer; 
-fi; 
-mkdir -p /home/renderer; 
-chown -R renderer:renderer /app /home/renderer
+COPY app.py /app/app.py
+
+RUN if ! getent group renderer >/dev/null 2>&1; then groupadd --system renderer; fi && if ! id renderer >/dev/null 2>&1; then useradd --system --gid renderer --create-home --home-dir /home/renderer renderer; fi && mkdir -p /home/renderer && chown -R renderer:renderer /app /home/renderer
 
 USER renderer
 
