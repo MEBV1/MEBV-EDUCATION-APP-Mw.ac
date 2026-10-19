@@ -17,10 +17,12 @@ window.loadBlogPosts = async function() {
   }
 }
 
-window.addEventListener("DOMContentLoaded", () => {
+window.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("blog-search")?.addEventListener("input", debounce(window.loadBlogPosts, 300));
   document.getElementById("blog-category")?.addEventListener("change", window.loadBlogPosts);
-  window.loadBlogPosts();
+  await window.loadBlogPosts();
+  const postId = new URLSearchParams(window.location.search).get("id");
+  if (postId && blogPosts.some(post => post.id === postId)) await openArticle(postId);
 });
 
 async function fetchBlogPosts(searchTerm = "", category = "all") {

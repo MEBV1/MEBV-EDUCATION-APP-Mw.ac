@@ -1,0 +1,14 @@
+[functions.push-api]
+# Gateway JWT verification must stay off so OPTIONS and anonymous subscription
+# requests reach the handler. Authenticated operations validate JWTs in push.ts;
+# manual sends additionally check the caller's current database role in the RPC.
+verify_jwt = false
+
+[functions.push-dispatcher]
+# The handler independently verifies PUSH_DISPATCH_SECRET.
+verify_jwt = false
+
+[functions.download-book]
+# Anonymous and authenticated requests are authorized by the handler; gateway JWT
+# verification must stay off so the browser's OPTIONS preflight reaches it.
+verify_jwt = false

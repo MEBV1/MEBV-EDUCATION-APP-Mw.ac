@@ -12,13 +12,15 @@ const ADMIN_SECTIONS = {
   advertisements: "Advertisements",
   users: "Users",
   payments: "Payments",
-  audit: "Audit Logs"
+  audit: "Audit Logs",
+  "push-notifications": "Push Notifications"
 };
 
 // Start logic when DOM is ready
 window.addEventListener("DOMContentLoaded", initAdminDashboard);
 
 let adminAuthStateListenerRegistered = false;
+let currentAdminRole = null;
 
 function logAdminSession(session, label = "Session check") {
     console.info("[AUTH DEBUG] " + label, {
@@ -91,6 +93,9 @@ async function initAdminDashboard() {
         return;
     }
 
+    currentAdminRole = profile.role;
+    const pushNavItem = document.querySelector('.admin-nav-item[data-section="push-notifications"]');
+    if (pushNavItem) pushNavItem.hidden = !["admin", "super_admin"].includes(currentAdminRole);
     setupAdminNavigation();
     loadSectionData("overview");
     } catch (error) {
@@ -99,69 +104,161 @@ async function initAdminDashboard() {
     }
 }
 
+const pendingBookCoverSyncs = new Map();
+
 async function syncBookCoverRecord(bookId) {
-    const { data, error } = await window.supabaseClient.functions.invoke("sync-book-cover", {
-        body: { bookId }
+    if (pendingBookCoverSyncs.has(bookId)) return pendingBookCoverSyncs.get(bookId);
+    const request = (async () => {
+        const { data, error } = await window.supabaseClient.functions.invoke("sync-book-cover", {
+            body: { bookId }
+        });
+        if (error) {
+            let message = error.message || "Book cover synchronization failed.";
+            let fileName = "";
+            if (error.context && typeof error.context.clone === "function") {
+                const responseBody = await error.context.clone().json().catch(() => null);
+                if (responseBody?.error) message = responseBody.error;
+                if (responseBody?.file_name) fileName = String(responseBody.file_name);
+            }
+            throw new Error(fileName && !message.includes(fileName) ? `${fileName} — ${message}` : message);
+        }
+        if (!data?.success) throw new Error(data?.error || "Book cover synchronization failed.");
+        if (!["synced", "already_valid", "not_missing"].includes(data.status)) {
+            throw new Error("Book cover synchronization returned an unrecognized result.");
+        }
+        return data;
+    })();
+    pendingBookCoverSyncs.set(bookId, request);
+    try {
+        return await request;
+    } finally {
+        pendingBookCoverSyncs.delete(bookId);
+    }
+}
+
+function describeBookCoverResult(result) {
+    if (result.status === "synced") return "First-page preview generated.";
+    if (result.status === "already_valid") return "A valid first-page preview is already saved.";
+    return result.message || "The existing cover was left unchanged and could not be verified.";
+}
+
+async function extractBookMetadataRecord(driveUrl) {
+    const { data, error } = await window.supabaseClient.functions.invoke("extract-book-metadata", {
+        body: { driveUrl }
     });
     if (error) {
-        let message = error.message || "Book cover synchronization failed.";
+        let message = error.message || "Book metadata extraction failed.";
         if (error.context && typeof error.context.clone === "function") {
             const responseBody = await error.context.clone().json().catch(() => null);
             if (responseBody?.error) message = responseBody.error;
         }
         throw new Error(message);
     }
-    if (!data?.success) throw new Error(data?.error || "Book cover synchronization failed.");
+    if (!data?.success) throw new Error(data?.error || "Book metadata extraction failed.");
     return data;
 }
+
+function adminBookCoverPreview(book) {
+    const coverUrl = String(book?.cover_url || "").trim();
+    if (!coverUrl ||
+        /(?:^|\/)(?:logo|icon)\.(?:png|jpe?g|webp)(?:$|[?#])/i.test(coverUrl) ||
+        /drive\.google\.com\/thumbnail\?/i.test(coverUrl)) return "";
+    try {
+        if (!["http:", "https:"].includes(new URL(coverUrl).protocol)) return "";
+    } catch {
+        return "";
+    }
+    return coverUrl;
+}
+
+function adminBookPreviewStatus(book) {
+    if (/drive\.google\.com\/thumbnail\?/i.test(String(book?.cover_url || ""))) {
+        return "The saved Drive thumbnail URL is not a generated book cover.";
+    }
+    const sourceUrls = [book?.drive_url, book?.download_url].map(value => String(value || "").trim()).filter(Boolean);
+    if (!sourceUrls.length) return "No source file link is saved.";
+    if (typeof window.getGoogleDriveFileId === "function" &&
+        !sourceUrls.some(sourceUrl => window.getGoogleDriveFileId(sourceUrl))) {
+        return "The saved link does not identify a supported Google Drive file.";
+    }
+    return "A first-page preview has not been generated.";
+}
+
+window.handleAdminBookPreviewError = function(image) {
+    const status = document.createElement("span");
+    status.className = "book-preview-status";
+    status.textContent = "The saved cover image could not be loaded.";
+    image.replaceWith(status);
+};
 
 let bookCoverSyncRunning = false;
 
 async function syncAllBookCovers(button) {
     if (bookCoverSyncRunning) return;
-    if (!window.confirm("Sync cover pages for all uploaded books now?")) return;
 
     bookCoverSyncRunning = true;
     if (button) button.disabled = true;
 
-    const counts = { total: 0, synced: 0, alreadyValid: 0, failed: [] };
+    const counts = { total: 0, synced: 0, alreadyValid: 0, notUpdated: [], failed: [] };
     try {
-        const books = [];
+        const booksById = new Map();
         const pageSize = 200;
         for (let offset = 0; ; offset += pageSize) {
             const { data: page, error } = await window.supabaseClient
                 .from("books")
-                .select("id,title")
-                .order("created_at", { ascending: true })
+                .select("id,title,cover_url")
+                .or("cover_url.is.null,cover_url.eq.,cover_url.eq.unavailable,cover_url.eq.failed,cover_url.eq.preview_unavailable,cover_url.eq.cover_failed,cover_url.eq.cover_unavailable")
+                .order("title", { ascending: true })
                 .range(offset, offset + pageSize - 1);
             if (error) throw error;
-            books.push(...(page || []));
+            (page || []).forEach(book => booksById.set(book.id, book));
             if (!page || page.length < pageSize) break;
         }
+        for (let offset = 0; ; offset += pageSize) {
+            const { data: page, error } = await window.supabaseClient
+                .from("books")
+                .select("id,title,cover_url")
+                .ilike("cover_url", "%drive.google.com/thumbnail%")
+                .order("title", { ascending: true })
+                .range(offset, offset + pageSize - 1);
+            if (error) throw error;
+            (page || []).forEach(book => booksById.set(book.id, book));
+            if (!page || page.length < pageSize) break;
+        }
+        const books = [...booksById.values()];
 
         counts.total = books.length;
+        if (!counts.total) {
+            window.showSuccess("No books require cover synchronization.");
+            return;
+        }
+        window.showLoading(`Found ${counts.total} books requiring cover synchronization.`);
+
         for (let index = 0; index < counts.total; index += 1) {
             const book = books[index];
-            window.showLoading(`Syncing book covers... ${index + 1} / ${counts.total}`);
+            window.showLoading(`Processing ${index + 1} / ${counts.total}\nProcessing: ${book.title || "Untitled book"}`);
             try {
                 const result = await syncBookCoverRecord(book.id);
-                if (result.status === "already_valid") counts.alreadyValid += 1;
-                else counts.synced += 1;
+                if (result.status === "synced") counts.synced += 1;
+                else if (result.status === "already_valid") counts.alreadyValid += 1;
+                else counts.notUpdated.push(`${book.title || "Untitled book"} — ${result.message || "Existing cover was left unchanged."}`);
             } catch (error) {
                 console.error("[BOOK COVER SYNC] Book failed:", book.id, error);
-                counts.failed.push(`${book.title || "Untitled book"} — ${error.message || "Preview could not be generated"}`);
+                const reason = error.message || "Preview could not be generated";
+                const bookName = book.title || "Untitled book";
+                counts.failed.push(reason.includes(bookName) ? reason : `${bookName} — ${reason}`);
             }
         }
 
-        const message = counts.failed.length
-            ? `Book cover sync completed with warnings. ${counts.synced} of ${counts.total} books updated, ${counts.failed.length} could not be processed.`
-            : `Book covers synced successfully. ${counts.synced} of ${counts.total} books updated.`;
+        const message = `Cover synchronization completed.\n${counts.total} books processed\n${counts.synced} covers generated\n${counts.alreadyValid} already valid\n${counts.notUpdated.length} not updated\n${counts.failed.length} failed`;
         if (counts.failed.length) {
             window.showError(message);
         } else {
             window.showSuccess(message);
         }
-        window.alert(`Cover Sync Complete\n${message}\nTotal: ${counts.total}\nSynced: ${counts.synced}\nAlready valid: ${counts.alreadyValid}\nFailed: ${counts.failed.length}${counts.failed.length ? `\n\nFailed books:\n${counts.failed.map(name => `- ${name}`).join("\n")}` : ""}`);
+        if (counts.failed.length || counts.notUpdated.length) {
+            window.alert(`${message}\n\nDetails:\n${[...counts.notUpdated, ...counts.failed].map(name => `- ${name}`).join("\n")}`);
+        }
         await loadSectionData("books");
     } catch (error) {
         console.error("[BOOK COVER SYNC] Could not complete synchronization:", error);
@@ -192,30 +289,52 @@ async function submitBookForm(form) {
     try {
         // Normalize the stored link; the server generates the persistent preview after insert.
         const normalizedDownloadUrl = window.convertGoogleDriveLink(rawDownloadUrl);
+        let extracted = null;
+        try {
+            extracted = await extractBookMetadataRecord(normalizedDownloadUrl);
+        } catch (metadataError) {
+            console.error("[BOOK UPLOAD] Metadata extraction failed:", metadataError);
+        }
+        const metadata = extracted?.metadata || {};
+        const useExtracted = (value, extractedValue) =>
+            !String(value || "").trim() || String(value).trim() === "Not detected" ? (extractedValue || "") : value;
 
         const { data: inserted, error } = await window.supabaseClient
             .from("books")
             .insert([{
-                title, 
-                author, 
+                title: useExtracted(title, metadata.title),
+                author: useExtracted(author, metadata.author),
                 category, 
+                subject: metadata.subject || "",
+                educational_level: metadata.educational_level || null,
+                publisher: metadata.publisher || "",
+                isbn: metadata.isbn || "",
+                year_published: metadata.year_published || null,
+                edition: metadata.edition || "",
+                language: metadata.language || "",
                 featured,
                 download_url: normalizedDownloadUrl,
+                drive_url: extracted?.drive_url || normalizedDownloadUrl,
+                drive_file_id: extracted?.file_id || null,
+                mime_type: extracted?.mime_type || null,
+                file_size: extracted?.file_size || null,
                 cover_url: null,
                 description: "Educational Material"
             }])
             .select("id");
 
         if (error) throw error;
+        let coverMessage = "First-page preview synchronization could not be started because the saved book ID was not returned.";
         if (inserted?.[0]?.id) {
             try {
-                await syncBookCoverRecord(inserted[0].id);
+                coverMessage = describeBookCoverResult(await syncBookCoverRecord(inserted[0].id));
             } catch (coverError) {
                 console.error("[BOOK COVER SYNC] New book preview failed:", inserted[0].id, coverError);
+                coverMessage = `Book saved; first-page preview failed: ${coverError.message || "unknown error"}`;
             }
         }
 
-        window.showSuccess("Book saved successfully.");
+        window.showSuccess(escapeHtml(`Book saved successfully. ${coverMessage}`));
         closeAdminModal();
         loadSectionData("books");
     } catch (err) {
@@ -232,10 +351,11 @@ async function regenBookThumbnail(bookId, driveUrl) {
     window.showLoading("Syncing first-page preview...");
     try {
         const result = await syncBookCoverRecord(bookId);
-        window.showSuccess(result.status === "already_valid" ? "Book already has a valid cover preview." : "First-page preview synced successfully.");
+        if (result.status === "not_missing") window.showToast(escapeHtml(describeBookCoverResult(result)), "warning");
+        else window.showSuccess(escapeHtml(describeBookCoverResult(result)));
         loadSectionData("books");
     } catch (error) {
-        window.showError(error.message || "Book cover synchronization failed.");
+        window.showError(escapeHtml(error.message || "Book cover synchronization failed."));
     } finally {
         window.hideLoading();
     }
@@ -248,6 +368,13 @@ async function loadSectionData(section) {
     const main = document.getElementById("admin-main-content");
     if (!main) return;
     if (section === "overview") return loadAdminOverview();
+    if (section === "push-notifications") {
+        if (!["admin", "super_admin"].includes(currentAdminRole)) {
+            window.showError("Only Admin and Super Admin accounts can send announcements.");
+            return;
+        }
+        return renderPushAnnouncementForm(main);
+    }
     
     window.showLoading("Loading data...");
     try {
@@ -257,7 +384,7 @@ async function loadSectionData(section) {
                 <div class="card" style="padding:1.5rem; margin-bottom:1.5rem; display:flex; justify-content:space-between; align-items:center;">
                     <h2 class="card-title">Curriculum Materials</h2>
                     <div style="display:flex;gap:.75rem;flex-wrap:wrap;">
-                        <button class="btn btn-outline" onclick="syncAllBookCovers(this)">SYNC ALL BOOK COVERS</button>
+                        <button class="btn btn-outline" onclick="syncAllBookCovers(this)">SYNC MISSING OR INVALID COVERS</button>
                         <button class="btn btn-primary" onclick="showCreateForm('books')">+ New Book</button>
                     </div>
                 </div>`;
@@ -265,11 +392,11 @@ async function loadSectionData(section) {
                 const rows = records.map(r => `
                     <tr>
                         <td style="display:flex; align-items:center; gap:10px;">
-                            ${r.cover_url
-                              ? `<img src="${r.cover_url}" alt="Book first-page preview"
+                                ${adminBookCoverPreview(r)
+                                  ? `<img src="${adminBookCoverPreview(r)}" alt="Book first-page preview"
                                      style="width:30px; height:45px; border-radius:3px; object-fit:contain; background:var(--bg-tertiary); border:1px solid var(--border-color);"
-                                     onerror="this.onerror=null;this.parentElement.textContent='Preview unavailable'">`
-                              : `<span style="font-size:.7rem;color:var(--muted-text,#666);">Preview unavailable</span>`}
+                                     onerror="window.handleAdminBookPreviewError(this)">`
+                              : `<span title="${escapeHtml(adminBookPreviewStatus(r))}" style="font-size:.7rem;color:var(--muted-text,#666);">${escapeHtml(adminBookPreviewStatus(r))}</span>`}
                             <span>${escapeHtml(r.title)}</span>
                         </td>
                         <td>${r.category}</td>
@@ -287,7 +414,72 @@ async function loadSectionData(section) {
             const { data } = await window.supabaseClient.from(table).select("*").order("created_at", { ascending: false }).limit(50);
             renderStandardTable(ADMIN_SECTIONS[section], data, section);
         }
+
     } finally { window.hideLoading(); }
+}
+
+function renderPushAnnouncementForm(main) {
+    main.innerHTML = `
+      <section class="card push-admin-card">
+        <h2 class="card-title">Send an announcement</h2>
+        <p>Announcements are queued for eligible devices. General Announcements reach every active subscription; other categories follow each device's preferences.</p>
+        <form id="push-announcement-form" class="push-admin-form">
+          <label>Category
+            <select name="category" class="form-control" required>
+              <option value="general">General Announcements</option>
+              <option value="books">Books</option>
+              <option value="vacancies">Vacancies</option>
+              <option value="videos">Videos</option>
+              <option value="python">Python Academy</option>
+              <option value="blogs">Blogs</option>
+            </select>
+          </label>
+          <label>Title
+            <input name="title" class="form-control" maxlength="120" required>
+          </label>
+          <label>Message
+            <textarea name="body" class="form-control" maxlength="240" rows="4" required></textarea>
+          </label>
+          <label>Destination path
+            <input name="targetUrl" class="form-control" maxlength="500" value="/index.html" placeholder="/books.html" required>
+          </label>
+          <input type="hidden" name="idempotencyKey" value="${crypto.randomUUID()}">
+          <p id="push-announcement-status" role="status" aria-live="polite"></p>
+          <button type="submit" class="btn btn-primary">Queue announcement</button>
+        </form>
+      </section>`;
+    document.getElementById("push-announcement-form").addEventListener("submit", submitPushAnnouncement);
+}
+
+async function submitPushAnnouncement(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    const status = document.getElementById("push-announcement-status");
+    button.disabled = true;
+    status.textContent = "Queueing announcement...";
+    delete status.dataset.error;
+    try {
+        if (!window.MEBVPush) throw new Error("The notification interface is not ready. Reload and try again.");
+        const fields = new FormData(form);
+        const result = await window.MEBVPush.invoke({
+            action: "send",
+            idempotencyKey: fields.get("idempotencyKey"),
+            category: fields.get("category"),
+            title: fields.get("title"),
+            body: fields.get("body"),
+            targetUrl: fields.get("targetUrl")
+        });
+        status.textContent = `Announcement queued (${result.notificationId}). Delivery is processed asynchronously and is not guaranteed exactly once.`;
+        form.reset();
+        form.elements.idempotencyKey.value = crypto.randomUUID();
+        form.elements.targetUrl.value = "/index.html";
+    } catch (error) {
+        status.textContent = error.message || "Announcement could not be queued.";
+        status.dataset.error = "true";
+    } finally {
+        button.disabled = false;
+    }
 }
 
 /**
@@ -445,7 +637,7 @@ function renderBookFormUI() {
             <input name="isbn" placeholder="ISBN" class="form-control">
             <input name="year_published" type="number" placeholder="Year" class="form-control">
             <input name="edition" placeholder="Edition" class="form-control">
-            <input name="language" placeholder="Language (Default English)" class="form-control">
+            <input name="language" placeholder="Language" class="form-control">
         </fieldset>
         <fieldset style="border:none; padding:0; display:grid; gap:1rem;">
             <input name="download_url" placeholder="Google Drive Share Link *" required class="form-control">
@@ -464,9 +656,6 @@ function renderVideoFormUI() {
                 <option value="Mathematics">Mathematics</option><option value="Science">Science</option>
                 <option value="ICT">ICT</option><option value="Business">Business</option>
             </select>
-            <input name="subject" placeholder="Subject" class="form-control">
-            <input name="teacher" placeholder="Teacher Name" class="form-control">
-            <input name="educational_level" placeholder="Level" class="form-control">
         </div>
         <input name="video_url" required placeholder="YouTube URL (https://www.youtube.com/watch?v=...)" class="form-control">
         <textarea name="description" placeholder="Topic Description" class="form-control" rows="3"></textarea>
@@ -476,13 +665,12 @@ function renderVideoFormUI() {
 function renderPythonFormUI() {
     return `
         <div style="display:grid; grid-template-columns: 80px 1fr; gap:1rem;">
-            <input name="lesson_number" type="number" placeholder="No." class="form-control" required>
+            <input name="lesson_number" type="number" min="1" placeholder="No." class="form-control" required>
             <input name="title" required placeholder="Lesson Name" class="form-control">
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
             <input name="module" placeholder="Module/Chapter Name" class="form-control">
             <select name="difficulty" class="form-control"><option>Beginner</option><option>Intermediate</option><option>Advanced</option></select>
-            <input name="duration" placeholder="Estimated Duration" class="form-control">
             <label><input type="checkbox" name="premium"> Premium Account Needed</label>
         </div>
         <input name="video_url" required placeholder="YouTube Video URL" class="form-control">
@@ -494,17 +682,19 @@ function renderVacancyFormUI() {
     return `
         <input name="title" required placeholder="Position Title" class="form-control">
         <input name="company" required placeholder="Organization/Institution" class="form-control">
+        <select name="category" class="form-control" required>
+            <option value="Teaching">Teaching</option><option value="Administration">Administration</option>
+            <option value="NGO">NGO</option><option value="Professional">Professional</option><option value="Other">Other</option>
+        </select>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
             <input name="location" placeholder="Work Location" class="form-control">
             <select name="employment_type" class="form-control">
-                <option>Full-time</option><option>Part-time</option><option>Contract</option><option>NGO Attachment</option>
+                <option>Full-time</option><option>Part-time</option><option>Contract</option><option>Temporary</option>
             </select>
             <input name="salary" placeholder="Remuneration / Pay Scale" class="form-control">
             <input name="deadline" placeholder="Deadline Date" class="form-control">
         </div>
-        <input name="qualification" placeholder="Min. Qualification Required" class="form-control">
         <input name="apply_link" placeholder="Direct Link / Website to apply" class="form-control">
-        <input name="contact_email" type="email" placeholder="Application Email" class="form-control">
         <textarea name="description" placeholder="Full Job Description" class="form-control" rows="5"></textarea>`;
 }
 
@@ -527,9 +717,13 @@ function renderBlogFormUI() {
     return `
         <input name="title" required placeholder="Post Title" class="form-control">
         <input name="category" placeholder="Category" class="form-control">
-        <input name="author_name" placeholder="Author" class="form-control">
         <input name="featured_image" placeholder="Image Link" class="form-control">
-        <input name="tags" placeholder="Tags (Separate with commas)" class="form-control">
+        <label>Publishing status
+          <select name="status" class="form-control">
+            <option value="draft">Save as draft</option>
+            <option value="published">Publish now</option>
+          </select>
+        </label>
         <textarea name="excerpt" placeholder="Short Teaser / Summary" class="form-control" rows="2"></textarea>
         <textarea name="content" required placeholder="Write Full Content Here..." class="form-control" rows="10"></textarea>`;
 }
@@ -565,9 +759,21 @@ async function handleMasterSubmission(type, formData) {
 
     const data = Object.fromEntries(formData.entries());
     
-    // Formatted Automatic Fixes
-    if(formData.get("is_active") === null) data.is_active = true;
-    if(formData.get("featured") === null) data.featured = false;
+    // Send only supported optional fields; omitted values use database defaults.
+    if (!formData.has("featured")) delete data.featured;
+    if (type === "lessons") {
+        data.position = Number(data.lesson_number);
+        data.summary = data.module || null;
+        data.level = data.difficulty || "Beginner";
+        data.description = data.objectives || null;
+        data.content = data.exercise || null;
+        data.premium = formData.has("premium");
+        delete data.lesson_number;
+        delete data.module;
+        delete data.difficulty;
+        delete data.objectives;
+        delete data.exercise;
+    }
 
     // VALIDATION RULES
     if (!data.title && !data.name) return window.showError("Required fields missing");
@@ -594,18 +800,74 @@ async function handleMasterSubmission(type, formData) {
     // BOOKS: G-DRIVE AUTOMATION
     if (type === 'books') {
         data.description = "DOWNLOAD BOOKS FOR FREE FROM MEBV PLATFORM";
-        // Native Thumbnail trigger from previous implementation
-        if (typeof window.getSmartCover === 'function') {
-            data.cover_url = window.getSmartCover({download_url: data.download_url});
+        data.cover_url = null;
+        try {
+            const extracted = await extractBookMetadataRecord(String(data.download_url || "").trim());
+            const metadata = extracted.metadata || {};
+            const useExtracted = (value, extractedValue) =>
+                !String(value || "").trim() || String(value).trim() === "Not detected" ? (extractedValue || "") : value;
+            for (const [field, extractedField] of [
+                ["title", "title"], ["author", "author"], ["subject", "subject"],
+                ["educational_level", "educational_level"], ["publisher", "publisher"],
+                ["isbn", "isbn"], ["edition", "edition"], ["language", "language"]
+            ]) {
+                data[field] = useExtracted(data[field], metadata[extractedField]);
+            }
+            data.year_published = data.year_published || metadata.year_published || null;
+            data.drive_url = extracted.drive_url;
+            data.drive_file_id = extracted.file_id;
+            data.mime_type = extracted.mime_type;
+            data.file_size = extracted.file_size || null;
+        } catch (error) {
+            console.error("[BOOK UPLOAD] Metadata extraction failed:", error);
         }
     }
 
     window.showLoading("Finalizing content and sync...");
     try {
-        const { error } = await window.supabaseClient.from(table).insert([data]);
-        if (error) throw error;
-        
-        window.showSuccess("Database successfully updated.");
+        let insertedBookId = null;
+        if (type === "blog") {
+            const shouldPublish = data.status === "published";
+            delete data.status;
+            const { data: userResult, error: userError } = await window.supabaseClient.auth.getUser();
+            if (userError || !userResult.user) throw new Error("A signed-in author is required to publish a blog post.");
+            data.author_id = userResult.user.id;
+            data.status = "draft";
+            const { data: inserted, error } = await window.supabaseClient
+                .from(table)
+                .insert([data])
+                .select("id")
+                .single();
+            if (error) throw error;
+            if (shouldPublish) {
+                const { error: publishError } = await window.supabaseClient
+                    .from(table)
+                    .update({ status: "published", published_at: new Date().toISOString() })
+                    .eq("id", inserted.id);
+                if (publishError) throw publishError;
+            }
+        } else if (type === "books") {
+            const { data: inserted, error } = await window.supabaseClient.from(table).insert([data]).select("id");
+            if (error) throw error;
+            insertedBookId = inserted?.[0]?.id || null;
+        } else {
+            const { error } = await window.supabaseClient.from(table).insert([data]);
+            if (error) throw error;
+        }
+        if (type === "books" && insertedBookId) {
+            let coverMessage = "First-page preview synchronization could not be started because the saved book ID was not returned.";
+            try {
+                coverMessage = describeBookCoverResult(await syncBookCoverRecord(insertedBookId));
+            } catch (coverError) {
+                console.error("[BOOK COVER SYNC] New book preview failed:", insertedBookId, coverError);
+                coverMessage = `Book saved; first-page preview failed: ${coverError.message || "unknown error"}`;
+            }
+            window.showSuccess(escapeHtml(coverMessage));
+        } else if (type === "books") {
+            window.showSuccess("Book saved, but its ID was not returned so the first-page preview could not be synchronized.");
+        } else {
+            window.showSuccess("Database successfully updated.");
+        }
         closeAdminModal();
         loadSectionData(type);
     } catch (err) {
@@ -620,11 +882,6 @@ async function handleMasterSubmission(type, formData) {
 (function () {
     const metadataFunctionUrl = `${SUPABASE_URL}/functions/v1/extract-book-metadata`;
     let extractionSequence = 0;
-
-    function driveThumbnail(url) {
-        const match = String(url || "").match(/[-\w]{25,}/);
-        return match ? `https://drive.google.com/thumbnail?id=${match[0]}&sz=w1600` : "";
-    }
 
     async function extractBookMetadata(form) {
         const link = form.elements.download_url.value.trim();
@@ -660,11 +917,7 @@ async function handleMasterSubmission(type, formData) {
                 }
             });
 
-            form.dataset.coverUrl = payload.cover_url || driveThumbnail(link);
-            const preview = form.querySelector("[data-book-preview]");
-            preview.src = form.dataset.coverUrl;
-            preview.hidden = false;
-            status.textContent = "Book information detected. Review it before saving.";
+            status.textContent = "Book information detected. The actual cover will be generated server-side after saving.";
         } catch (error) {
             status.textContent = error.message || "Book information could not be read.";
         } finally {
@@ -689,15 +942,15 @@ async function handleMasterSubmission(type, formData) {
         const year = form.elements.year_published.value.trim();
         const record = {
             title,
-            author: form.elements.author.value.trim() || "Not detected",
+            author: form.elements.author.value.trim(),
             category: categoryForLevel(form.elements.educational_level.value),
             subject: form.elements.subject.value.trim() || null,
             educational_level: form.elements.educational_level.value.trim() || null,
-            publisher: form.elements.publisher.value.trim() || "Not detected",
-            isbn: form.elements.isbn.value.trim() || "Not detected",
+            publisher: form.elements.publisher.value.trim(),
+            isbn: form.elements.isbn.value.trim(),
             year_published: year ? Number(year) : null,
-            edition: form.elements.edition.value.trim() || "Not detected",
-            language: form.elements.language.value.trim() || "English",
+            edition: form.elements.edition.value.trim(),
+            language: form.elements.language.value.trim(),
             download_url: link,
             cover_url: null,
             featured: form.elements.featured.checked,
@@ -711,14 +964,14 @@ async function handleMasterSubmission(type, formData) {
             if (error) throw error;
             if (inserted?.[0]?.id) {
                 try {
-                    await syncBookCoverRecord(inserted[0].id);
-                    window.showSuccess("Book saved successfully.");
+                    const result = await syncBookCoverRecord(inserted[0].id);
+                    window.showSuccess(escapeHtml(`Book saved successfully. ${describeBookCoverResult(result)}`));
                 } catch (coverError) {
                     console.error("[BOOK COVER SYNC] New book preview failed:", inserted[0].id, coverError);
-                    window.showSuccess("Book saved, but its first-page preview could not be generated. Use SYNC ALL BOOK COVERS to retry.");
+                    window.showSuccess(escapeHtml(`Book saved; first-page preview failed: ${coverError.message || "unknown error"}`));
                 }
             } else {
-                window.showSuccess("Book saved successfully.");
+                window.showSuccess("Book saved, but its ID was not returned so the first-page preview could not be synchronized.");
             }
             closeAdminModal();
             loadSectionData("books");
@@ -746,10 +999,9 @@ async function handleMasterSubmission(type, formData) {
                 <input name="isbn" placeholder="ISBN" class="form-control">
                 <input name="year_published" type="number" min="1000" max="2100" placeholder="Year" class="form-control">
                 <input name="edition" placeholder="Edition" class="form-control">
-                <input name="language" value="English" placeholder="Language" class="form-control">
+                <input name="language" placeholder="Language" class="form-control">
                 <input name="download_url" required placeholder="Paste Google Drive PDF link" class="form-control">
                 <div data-book-extraction-status aria-live="polite" style="font-size:.85rem;min-height:1.2rem;"></div>
-                <img data-book-preview hidden alt="First page preview" style="width:100%;max-height:360px;object-fit:contain;border:1px solid var(--border-color);">
                 <div style="display:flex;gap:1rem;flex-wrap:wrap;">
                     <label><input type="checkbox" name="featured"> Featured</label>
                     <label><input type="checkbox" name="is_active" checked> Active</label>
@@ -789,11 +1041,6 @@ async function handleMasterSubmission(type, formData) {
         } catch (_) {
             return false;
         }
-    }
-
-    function previewFor(url) {
-        const id = String(url || "").match(/[-\w]{25,}/)?.[0];
-        return id ? `https://drive.google.com/thumbnail?id=${id}&sz=w1600` : "";
     }
 
     function fileIdFor(url) {
@@ -858,11 +1105,7 @@ async function handleMasterSubmission(type, formData) {
                 // Educational Level is administrator-controlled and authoritative.
                 if (name !== "educational_level" && field && value !== null && value !== "") field.value = value;
             });
-            form.dataset.coverUrl = payload.cover_url || previewFor(link);
-            const preview = form.querySelector("[data-book-preview]");
-            preview.src = form.dataset.coverUrl || "";
-            preview.hidden = !form.dataset.coverUrl;
-            status.textContent = `Detected ${payload.extension || "document"} (${payload.mime_type || "unknown type"}). Review before saving.`;
+            status.textContent = `Detected ${payload.extension || "document"} (${payload.mime_type || "unknown type"}). The actual cover will be generated server-side after saving.`;
         } catch (error) {
             status.textContent = error.message || "Book information could not be read.";
             form.dataset.extractionFailed = "true";
@@ -900,15 +1143,15 @@ async function handleMasterSubmission(type, formData) {
         const year = form.elements.year_published.value.trim();
         const record = {
             title,
-            author: form.elements.author.value.trim() || "Not detected",
+            author: form.elements.author.value.trim(),
             category: categoryFor(form.elements.educational_level.value),
             subject: form.elements.subject.value.trim() || null,
             educational_level: form.elements.educational_level.value.trim() || null,
-            publisher: form.elements.publisher.value.trim() || "Not detected",
-            isbn: form.elements.isbn.value.trim() || "Not detected",
+            publisher: form.elements.publisher.value.trim(),
+            isbn: form.elements.isbn.value.trim(),
             year_published: year ? Number(year) : null,
-            edition: form.elements.edition.value.trim() || "Not detected",
-            language: form.elements.language.value.trim() || "English",
+            edition: form.elements.edition.value.trim(),
+            language: form.elements.language.value.trim(),
             download_url: link,
             cover_url: null,
             featured: form.elements.featured.checked,
@@ -920,18 +1163,19 @@ async function handleMasterSubmission(type, formData) {
         try {
             const { data: inserted, error } = await window.supabaseClient.from("books").insert([record]).select("id");
             if (error) throw error;
+            let coverMessage = "First-page preview synchronization could not be started because the saved book ID was not returned.";
             if (inserted?.[0]?.id) {
                 try {
-                    await syncBookCoverRecord(inserted[0].id);
+                    coverMessage = describeBookCoverResult(await syncBookCoverRecord(inserted[0].id));
                 } catch (coverError) {
                     console.error("[BOOK COVER SYNC] New book preview failed:", inserted[0].id, coverError);
+                    coverMessage = `First-page preview failed: ${coverError.message || "unknown error"}`;
                 }
             }
-            const status = form.querySelector("[data-book-extraction-status]");
             if (form.dataset.extractionFailed === "true") {
-                window.showSuccess("Book saved, but automatic information extraction could not be completed.");
+                window.showSuccess(escapeHtml(`Book saved; automatic information extraction failed. ${coverMessage}`));
             } else {
-                window.showSuccess("Book saved successfully.");
+                window.showSuccess(escapeHtml(`Book saved successfully. ${coverMessage}`));
             }
             closeAdminModal();
             loadSectionData("books");
@@ -960,10 +1204,9 @@ async function handleMasterSubmission(type, formData) {
                 <input name="isbn" placeholder="ISBN" class="form-control">
                 <input name="year_published" type="number" min="1000" max="2100" placeholder="Year" class="form-control">
                 <input name="edition" placeholder="Edition" class="form-control">
-                <input name="language" value="English" placeholder="Language" class="form-control">
+                <input name="language" placeholder="Language" class="form-control">
                 <label>Google Drive Link<div style="display:flex;gap:.5rem;align-items:center;"><input name="download_url" required placeholder="Paste Google Drive document link" class="form-control"><button type="button" class="btn btn-outline" data-paste-drive title="Read clipboard">📋 Paste Google Drive Link</button></div></label>
                 <div data-book-extraction-status aria-live="polite" style="font-size:.85rem;min-height:1.2rem;"></div>
-                <img data-book-preview hidden alt="Document preview" style="width:100%;max-height:360px;object-fit:contain;border:1px solid var(--border-color);">
                 <div style="display:flex;gap:1rem;flex-wrap:wrap;"><label><input type="checkbox" name="featured"> Featured</label><label><input type="checkbox" name="is_active" checked> Active</label></div>
                 <button class="btn btn-primary" type="submit">Save &amp; Publish</button>
             </form>`;
@@ -1033,25 +1276,25 @@ async function handleMasterSubmission(type, formData) {
         review.innerHTML = (books || []).map((book, index) => {
             const driveUrl = escapeHtml(String(book.download_url || book.google_drive_url || "").trim());
             const title = escapeHtml(String(book.title || "").trim() || "Untitled document");
-            const author = escapeHtml(String(book.author || "Not detected"));
-            const subject = escapeHtml(String(book.subject || "Not detected"));
+            const author = escapeHtml(String(book.author || ""));
+            const subject = escapeHtml(String(book.subject || ""));
             const level = escapeHtml(String(book.educational_level || defaultLevel || "").trim() || defaultLevel || "");
-            const publisher = escapeHtml(String(book.publisher || "Not detected"));
-            const isbn = escapeHtml(String(book.isbn || "Not detected"));
+            const publisher = escapeHtml(String(book.publisher || ""));
+            const isbn = escapeHtml(String(book.isbn || ""));
             const year = escapeHtml(String(book.year_published || "").trim() || "");
-            const edition = escapeHtml(String(book.edition || "Not detected"));
-            const language = escapeHtml(String(book.language || "English"));
+            const edition = escapeHtml(String(book.edition || ""));
+            const language = escapeHtml(String(book.language || ""));
             const cover = book.cover_url || "";
 
             return `
                 <div style="border:1px solid var(--border-color); border-radius:12px; padding:1rem; display:grid; gap:.75rem; background:rgba(255,255,255,.02);">
                     <div style="display:flex; gap:1rem; align-items:center;">
                         ${cover
-                          ? `<img src="${escapeHtml(cover)}" alt="First-page preview" style="width:60px;height:88px;object-fit:contain;background:var(--bg-tertiary);border-radius:10px;border:1px solid var(--border-color);" onerror="this.onerror=null;this.style.visibility='hidden'">`
-                          : `<div style="width:60px;height:88px;display:grid;place-items:center;text-align:center;font-size:.65rem;color:var(--muted-text,#666);background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:10px;">Preview unavailable</div>`}
+                          ? `<img src="${escapeHtml(cover)}" alt="First-page preview" style="width:60px;height:88px;object-fit:contain;background:var(--bg-tertiary);border-radius:10px;border:1px solid var(--border-color);" onerror="this.onerror=null;this.replaceWith(document.createTextNode('Saved cover image could not be loaded.'))">`
+                          : `<div style="width:60px;height:88px;display:grid;place-items:center;text-align:center;font-size:.65rem;color:var(--muted-text,#666);background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:10px;">Preview generated after saving</div>`}
                         <div style="flex:1; min-width:0;">
                             <div style="font-weight:700; margin-bottom:.25rem;">${title}</div>
-                            <div style="font-size:.8rem; color:var(--muted-text, #666); word-break:break-all;">${driveUrl || "No Google Drive URL"}</div>
+                            <div style="font-size:.8rem; color:var(--muted-text, #666); word-break:break-all;">${escapeHtml(book.mimeType || book.mime_type || book.extension || "")} · ${driveUrl || "No Google Drive URL"}</div>
                         </div>
                     </div>
                     <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:.75rem;">
@@ -1086,6 +1329,9 @@ async function handleMasterSubmission(type, formData) {
         if (!looksLikeFolderLink(folderUrl) && !parseFolderId(folderUrl)) return window.showError("Use a valid Google Drive folder link, for example: https://drive.google.com/drive/folders/FOLDER_ID");
 
         status.textContent = "Scanning folder for supported books...";
+        form.dataset.folderBooks = "[]";
+        form.dataset.folderUnsupported = "[]";
+        renderFolderReview(form, [], level || "");
         button.disabled = true;
 
         try {
@@ -1097,35 +1343,58 @@ async function handleMasterSubmission(type, formData) {
                 }
             });
 
-            if (error) throw new Error(error.message || "Folder scan failed.");
+            if (error) {
+                console.error("[FOLDER SCAN] Edge Function error:", error);
+                let message = error.message || "Folder scan failed.";
+                if (error.context && typeof error.context.clone === "function") {
+                    const responseBody = await error.context.clone().json().catch(() => null);
+                    if (responseBody?.error) message = responseBody.error;
+                }
+                throw new Error(message);
+            }
 
             const files = Array.isArray(data?.files) ? data.files : [];
             const supported = files.filter(file => file && file.supported);
-            if (!supported.length) throw new Error("No supported documents were found in that folder.");
+            const unsupported = files.filter(file => file && !file.supported);
+            form.dataset.folderUnsupported = JSON.stringify(unsupported.map(file => ({
+                name: String(file.name || "Untitled document"),
+                reason: String(file.reason || "Unsupported format.")
+            })));
+            if (!supported.length) {
+                form.dataset.folderBooks = "[]";
+                renderFolderReview(form, [], level || "");
+                status.textContent = `Found ${files.length} file${files.length === 1 ? "" : "s"}; none have a supported format.`;
+                if (unsupported.length) status.textContent += `\n${unsupported.map(file => `${file.name}: ${file.reason}`).join("\n")}`;
+                return;
+            }
 
             const normalised = supported.map(file => ({
                 id: file.id,
                 title: String(file.name || "Untitled document").replace(/\.[^.]+$/, ""),
                 educational_level: String(level || "").trim(),
-                language: "English",
-                author: "Not detected",
-                subject: "Not detected",
-                publisher: "Not detected",
-                isbn: "Not detected",
-                edition: "Not detected",
+                language: "",
+                author: "",
+                subject: "",
+                publisher: "",
+                isbn: "",
+                edition: "",
                 year_published: "",
                 download_url: String(file.webContentLink || file.webViewLink || "").trim(),
                 google_drive_url: String(file.webViewLink || file.webContentLink || "").trim(),
                 cover_url: "",
+                drive_file_id: String(file.id || ""),
+                drive_url: String(file.webViewLink || file.webContentLink || "").trim(),
+                mime_type: String(file.mimeType || ""),
+                file_size: Number(file.size) || null,
+                extension: String(file.extension || ""),
+                mimeType: String(file.mimeType || ""),
                 file_name: String(file.name || "Untitled document")
             }));
 
             form.dataset.folderBooks = JSON.stringify(normalised);
             renderFolderReview(form, normalised, level || "");
-            status.textContent = `Found ${supported.length} supported document${supported.length === 1 ? "" : "s"}. Review and save below.`;
-            if ((data?.unsupportedCount || 0) > 0) {
-                status.textContent += ` ${data.unsupportedCount} unsupported file${data.unsupportedCount === 1 ? "" : "s"} were skipped.`;
-            }
+            status.textContent = `${files.length} files found. ${supported.length} supported; ${unsupported.length} unsupported. Review and save below.`;
+            if (unsupported.length) status.textContent += `\n${unsupported.map(file => `${file.name}: ${file.reason}`).join("\n")}`;
         } catch (error) {
             status.textContent = error.message || "Folder scan could not complete.";
         } finally {
@@ -1133,59 +1402,123 @@ async function handleMasterSubmission(type, formData) {
         }
     }
 
-    async function saveFolderBooks(form) {
-        const records = JSON.parse(form.dataset.folderBooks || "[]");
-        if (!records.length) return window.showError("Scan a folder first so there are books to upload.");
+    let folderUploadRunning = false;
 
-        const prepared = records.map((book) => {
-            const fileUrl = String(book.download_url || book.google_drive_url || "").trim();
-            const title = String(book.title || "").trim() || "Google Drive document";
-            const level = String(book.educational_level || form.elements.educational_level.value || "").trim();
-            return {
+    async function saveFolderBooks(form) {
+        if (folderUploadRunning) return;
+        folderUploadRunning = true;
+        const saveButton = form.querySelector("[data-save-folder-books]");
+        if (saveButton) saveButton.disabled = true;
+        try {
+        const records = JSON.parse(form.dataset.folderBooks || "[]");
+        if (!records.length) {
+            window.showError("Scan a folder first so there are books to upload.");
+            return;
+        }
+
+        const unsupported = JSON.parse(form.dataset.folderUnsupported || "[]");
+        const uploadFailures = [];
+        const coverFailures = [];
+        const skippedCovers = [];
+        const metadataWarnings = [];
+        let synced = 0;
+        let alreadyValid = 0;
+        let saved = 0;
+
+        for (let index = 0; index < records.length; index += 1) {
+            const source = records[index];
+            const fileName = String(source.file_name || source.title || "Untitled document");
+            const fileUrl = String(source.download_url || source.google_drive_url || source.drive_url || "").trim();
+            const isMissing = value => !String(value ?? "").trim() || String(value).trim() === "Not detected";
+            const preferAdminValue = (manualValue, extractedValue) =>
+                isMissing(manualValue) ? (extractedValue ?? manualValue ?? "") : manualValue;
+
+            window.showLoading(`Processing ${index + 1} / ${records.length}\nCurrent file: ${fileName}`);
+            let extracted = null;
+            let extractionFailure = "";
+            try {
+                extracted = await extractBookMetadataRecord(fileUrl);
+            } catch (error) {
+                extractionFailure = error.message || "Metadata extraction failed.";
+                console.error("[BOOK UPLOAD] Metadata extraction failed:", fileName, error);
+                metadataWarnings.push(`${fileName} — ${extractionFailure}`);
+            }
+
+            const metadata = extracted?.metadata || {};
+            const title = preferAdminValue(source.title, metadata.title) || "Google Drive document";
+            const level = preferAdminValue(source.educational_level, metadata.educational_level || form.elements.educational_level.value);
+            const record = {
                 title,
-                author: String(book.author || "Not detected").trim() || "Not detected",
+                author: preferAdminValue(source.author, metadata.author),
                 category: categoryFor(level),
-                subject: String(book.subject || "Not detected").trim() || "Not detected",
+                subject: preferAdminValue(source.subject, metadata.subject),
                 educational_level: level || null,
-                publisher: String(book.publisher || "Not detected").trim() || "Not detected",
-                isbn: String(book.isbn || "Not detected").trim() || "Not detected",
-                year_published: Number(String(book.year_published || "").trim()) || null,
-                edition: String(book.edition || "Not detected").trim() || "Not detected",
-                language: String(book.language || "English").trim() || "English",
+                publisher: preferAdminValue(source.publisher, metadata.publisher),
+                isbn: preferAdminValue(source.isbn, metadata.isbn),
+                year_published: Number(preferAdminValue(source.year_published, metadata.year_published)) || null,
+                edition: preferAdminValue(source.edition, metadata.edition),
+                language: preferAdminValue(source.language, metadata.language),
                 download_url: fileUrl,
+                drive_url: extracted?.drive_url || source.drive_url || fileUrl,
+                drive_file_id: extracted?.file_id || source.drive_file_id || null,
+                mime_type: extracted?.mime_type || source.mime_type || null,
+                file_size: extracted?.file_size || source.file_size || null,
                 cover_url: null,
                 featured: false,
                 is_active: true,
                 description: "DOWNLOAD BOOKS FOR FREE FROM MEBV PLATFORM"
             };
-        });
 
-        window.showLoading("Saving all books...");
-        try {
-            const { data: inserted, error } = await window.supabaseClient.from("books").insert(prepared).select("id,title");
-            if (error) throw error;
-            const failed = [];
-            for (let index = 0; index < (inserted || []).length; index += 1) {
-                const book = inserted[index];
-                window.showLoading(`Generating first-page previews... ${index + 1} / ${inserted.length}`);
+            try {
+                const { data: inserted, error } = await window.supabaseClient
+                    .from("books")
+                    .insert([record])
+                    .select("id,title")
+                    .single();
+                if (error) throw error;
+                saved += 1;
+
                 try {
-                    await syncBookCoverRecord(book.id);
-                } catch (coverError) {
-                    console.error("[BOOK COVER SYNC] New book preview failed:", book.id, coverError);
-                    failed.push(`${book.title || "Untitled book"} — ${coverError.message || "Preview could not be generated"}`);
+                    const result = await syncBookCoverRecord(inserted.id);
+                    if (result.status === "synced") synced += 1;
+                    else if (result.status === "already_valid") alreadyValid += 1;
+                    else skippedCovers.push(`${fileName} — ${result.message || "Existing cover was left unchanged."}`);
+                } catch (error) {
+                    console.error("[BOOK COVER SYNC] New book preview failed:", inserted.id, error);
+                    const reason = error.message || "First-page preview could not be generated.";
+                    coverFailures.push(reason.includes(fileName) ? reason : `${fileName} — ${reason}`);
                 }
+            } catch (error) {
+                console.error("[BOOK UPLOAD] Book record could not be saved:", fileName, error);
+                uploadFailures.push(`${fileName} — Book record could not be saved: ${error.message || "database error"}`);
             }
-            if (failed.length) {
-                window.showSuccess(`${prepared.length} books saved. ${failed.length} previews could not be generated; use SYNC ALL BOOK COVERS to retry.`);
-                window.alert(`Book upload completed with preview warnings:\n${failed.map(name => `- ${name}`).join("\n")}`);
-            } else {
-                window.showSuccess(`${prepared.length} books saved successfully.`);
-            }
-            closeAdminModal();
-            loadSectionData("books");
+        }
+
+        const total = records.length + unsupported.length;
+        const failed = uploadFailures.length + coverFailures.length;
+        const summary = `Bulk upload completed.\n${total} files checked\n${saved} books saved; ${uploadFailures.length} upload failures\n${synced} covers generated; ${alreadyValid} already valid; ${skippedCovers.length} not updated; ${coverFailures.length} cover failures\n${unsupported.length} unsupported\n${metadataWarnings.length} metadata warnings`;
+        const details = [
+            ...uploadFailures,
+            ...coverFailures,
+            ...skippedCovers,
+            ...unsupported.map(file => `${file.name} — ${file.reason}`),
+            ...metadataWarnings
+        ];
+        window.showLoading("Finishing book upload...");
+        if (failed || unsupported.length || skippedCovers.length || metadataWarnings.length) {
+            window.alert(`${summary}${details.length ? `\n\nDetails:\n${details.map(name => `- ${name}`).join("\n")}` : ""}`);
+        } else {
+            window.showSuccess(summary);
+        }
+        closeAdminModal();
+        loadSectionData("books");
+        window.hideLoading();
         } catch (error) {
-            window.showError("One or more books could not be saved: " + error.message);
+            console.error("[BOOK UPLOAD] Folder processing could not complete:", error);
+            window.showError(`Folder processing could not complete: ${error.message || "Unknown error"}`);
         } finally {
+            folderUploadRunning = false;
+            if (saveButton) saveButton.disabled = false;
             window.hideLoading();
         }
     }
@@ -1196,18 +1529,35 @@ async function handleMasterSubmission(type, formData) {
 
         const level = form.elements.educational_level_single.value.trim();
         const year = form.elements.year_published.value.trim();
+        let extracted = null;
+        try {
+            extracted = await extractBookMetadataRecord(link);
+        } catch (error) {
+            console.error("[BOOK UPLOAD] Metadata extraction failed:", error);
+        }
+        const metadata = extracted?.metadata || {};
+        const preferManual = (value, extractedValue) => {
+            const manual = String(value || "").trim();
+            return manual && manual !== "Not detected" && manual !== "Google Drive document"
+                ? manual
+                : (extractedValue || "");
+        };
         const record = {
-            title,
-            author: form.elements.author.value.trim() || "Not detected",
-            category: categoryFor(level),
-            subject: form.elements.subject.value.trim() || "Not detected",
-            educational_level: level || null,
-            publisher: form.elements.publisher.value.trim() || "Not detected",
-            isbn: form.elements.isbn.value.trim() || "Not detected",
-            year_published: year ? Number(year) : null,
-            edition: form.elements.edition.value.trim() || "Not detected",
-            language: form.elements.language.value.trim() || "English",
+            title: preferManual(title, metadata.title),
+            author: preferManual(form.elements.author.value, metadata.author),
+            category: categoryFor(level || metadata.educational_level),
+            subject: preferManual(form.elements.subject.value, metadata.subject),
+            educational_level: level || metadata.educational_level || null,
+            publisher: preferManual(form.elements.publisher.value, metadata.publisher),
+            isbn: preferManual(form.elements.isbn.value, metadata.isbn),
+            year_published: year ? Number(year) : (metadata.year_published || null),
+            edition: preferManual(form.elements.edition.value, metadata.edition),
+            language: preferManual(form.elements.language.value, metadata.language),
             download_url: link,
+            drive_url: extracted?.drive_url || link,
+            drive_file_id: extracted?.file_id || null,
+            mime_type: extracted?.mime_type || null,
+            file_size: extracted?.file_size || null,
             cover_url: null,
             featured: form.elements.featured.checked,
             is_active: form.elements.is_active.checked,
@@ -1218,14 +1568,14 @@ async function handleMasterSubmission(type, formData) {
         try {
             const { data: inserted, error } = await window.supabaseClient.from("books").insert([record]).select("id").single();
             if (error) throw error;
-            let coverWarning = "";
+            let coverMessage = "First-page preview synchronization could not be started.";
             try {
-                await syncBookCoverRecord(inserted.id);
+                coverMessage = describeBookCoverResult(await syncBookCoverRecord(inserted.id));
             } catch (coverError) {
                 console.error("[BOOK COVER SYNC] New book preview failed:", inserted.id, coverError);
-                coverWarning = " Its first-page preview could not be generated; you can retry with SYNC ALL BOOK COVERS.";
+                coverMessage = `First-page preview failed: ${coverError.message || "unknown error"}`;
             }
-            window.showSuccess(`Book saved successfully.${coverWarning}`);
+            window.showSuccess(escapeHtml(`Book saved successfully. ${coverMessage}`));
             closeAdminModal();
             loadSectionData("books");
         } catch (error) {
@@ -1256,7 +1606,7 @@ async function handleMasterSubmission(type, formData) {
                         </select>
                     </label>
                     <button type="button" class="btn btn-primary" data-scan-folder>Scan Folder</button>
-                    <div data-folder-status aria-live="polite" style="font-size:.85rem; min-height:1.2rem; color:var(--muted-text, #666);">Paste a folder link and choose the class level to begin.</div>
+                    <div data-folder-status aria-live="polite" style="font-size:.85rem; min-height:1.2rem; color:var(--muted-text, #666); white-space:pre-wrap;">Paste a folder link and choose the class level to begin.</div>
                     <div data-folder-review style="display:grid; gap:1rem;"></div>
                     <button type="button" class="btn btn-accent" data-save-folder-books>Save &amp; Upload All</button>
                 </div>
@@ -1273,7 +1623,7 @@ async function handleMasterSubmission(type, formData) {
                     <input name="isbn" placeholder="ISBN" class="form-control">
                     <input name="year_published" type="number" min="1000" max="2100" placeholder="Year" class="form-control">
                     <input name="edition" placeholder="Edition" class="form-control">
-                    <input name="language" value="English" placeholder="Language" class="form-control">
+                    <input name="language" placeholder="Language" class="form-control">
                     <input name="download_url" placeholder="Paste Google Drive document link" class="form-control">
                     <div style="display:flex;gap:1rem;flex-wrap:wrap;"><label><input type="checkbox" name="featured"> Featured</label><label><input type="checkbox" name="is_active" checked> Active</label></div>
                     <button type="submit" class="btn btn-primary">Save &amp; Publish</button>

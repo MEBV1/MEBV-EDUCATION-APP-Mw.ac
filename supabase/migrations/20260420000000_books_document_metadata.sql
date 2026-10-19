@@ -1,0 +1,5 @@
+ALTER TABLE public.books
+  ADD COLUMN IF NOT EXISTS drive_url TEXT,
+  ADD COLUMN IF NOT EXISTS drive_file_id TEXT,
+  ADD COLUMN IF NOT EXISTS mime_type TEXT,
+  ADD COLUMN IF NOT EXISTS file_size BIGINT;

@@ -27,7 +27,10 @@ async function loadVideos() {
 
     videoCollection = await fetchVideos(searchTerm, category);
     renderVideoPlaylist(videoCollection);
-    if (!selectedVideo && videoCollection.length > 0) selectedVideo = videoCollection[0];
+    const requestedVideoId = new URLSearchParams(window.location.search).get("id");
+    const requestedVideo = videoCollection.find(video => video.id === requestedVideoId);
+    if (requestedVideo) selectedVideo = requestedVideo;
+    else if (!selectedVideo && videoCollection.length > 0) selectedVideo = videoCollection[0];
     renderCurrentVideo(selectedVideo);
     updateProgressSummary();
   } finally {

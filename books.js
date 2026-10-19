@@ -115,57 +115,144 @@ async function fetchBookDetails(bookId) {
   }
 }
 
-/**
- * Safely log a resource download event to monitor analytics
- * and update download metrics counters
- * 
- * @param {string} bookId - Book UUID identifier
- */
-async function trackDownload(bookId) {
-  console.log("[Analytics] Download button clicked");
-  
-  if (!window.supabaseClient || !bookId) return;
+const freeDownloadVisitorKey = "mebv_free_download_visitor_id";
+const activeBookDownloads = new Map();
 
-  // Duplicate protection using sessionStorage
-  const sessionKey = `downloaded_book_${bookId}`;
-  const alreadyCounted = sessionStorage.getItem(sessionKey) === "true";
-  
-  if (!alreadyCounted) {
-    const countEl = document.getElementById(`book-downloads-${bookId}`);
-    const currentCount = countEl ? parseInt(countEl.textContent) : 0;
+function getFreeDownloadVisitorId() {
+  let visitorId = localStorage.getItem(freeDownloadVisitorKey);
+  if (!visitorId) {
+    visitorId = crypto.randomUUID();
+    localStorage.setItem(freeDownloadVisitorKey, visitorId);
+  }
+  return visitorId;
+}
 
-    // Optimistic UI Update & DB Save
-    window.incrementCounter("books", "downloads_count", bookId, currentCount, (newVal) => {
-      if (countEl) countEl.textContent = newVal;
+function getDownloadFilename(response, fallback) {
+  const disposition = response.headers.get("content-disposition") || "";
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      return fallback;
+    }
+  }
+  return disposition.match(/filename="?([^";]+)"?/i)?.[1] || fallback;
+}
+
+async function updateBookDownloadCount(bookId) {
+  const { data, error } = await window.supabaseClient
+    .from("books")
+    .select("downloads_count")
+    .eq("id", bookId)
+    .maybeSingle();
+  if (error) {
+    console.error("[BOOK DOWNLOAD] Could not refresh download count:", error);
+    return;
+  }
+  document.querySelectorAll(
+    `#book-downloads-${bookId}, [data-download-count-for="${bookId}"]`
+  ).forEach((element) => {
+    const count = Number(data?.downloads_count) || 0;
+    element.textContent = element.classList.contains("mebv-counts")
+      ? `${count} Downloads`
+      : String(count);
+  });
+}
+
+async function downloadBookFile(bookId) {
+  if (activeBookDownloads.has(bookId)) return activeBookDownloads.get(bookId);
+  const request = (async () => {
+    if (!window.supabaseClient || !bookId) {
+      throw new Error("The download service is not available.");
+    }
+
+    const { data: { session } } = await window.supabaseClient.auth.getSession();
+    const visitorId = session?.user ? null : getFreeDownloadVisitorId();
+    const requestId = crypto.randomUUID();
+    const endpoint = `${window.supabaseClient.supabaseUrl}/functions/v1/download-book`;
+    const headers = {
+      "Content-Type": "application/json",
+      "apikey": window.supabaseClient.supabaseKey,
+      "Authorization": `Bearer ${session?.access_token || window.supabaseClient.supabaseKey}`
+    };
+    let reservationMade = false;
+    const postAction = (action) => fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ action, bookId, visitorId, requestId })
     });
-    
-    // Mark as counted in session
-    sessionStorage.setItem(sessionKey, "true");
-    console.log("[Analytics] Download counted");
 
     try {
-      // Register user profile event detail inside downloads analytics logging table
-      const { data: { session } } = await window.supabaseClient.auth.getSession();
-      const userId = session && session.user ? session.user.id : null;
+      const response = await postAction("download");
+      if (!response.ok) {
+        const result = await response.json().catch(() => null);
+        if (response.status === 429 && result?.code === "FREE_DOWNLOAD_LIMIT_REACHED") {
+          window.showAuthModal("download-limit");
+          return false;
+        }
+        throw new Error(result?.error || `Download failed (HTTP ${response.status}).`);
+      }
+      reservationMade = true;
+      if (response.headers.get("x-download-request-id") !== requestId) {
+        throw new Error("The download response did not match this request.");
+      }
 
-      await window.supabaseClient
-        .from("book_downloads")
-        .insert([
-          {
-            book_id: bookId,
-            user_id: userId,
-            downloaded_at: new Date().toISOString()
-          }
-        ]);
-    } catch (err) {
-      console.warn("Analytics logger deferred download record registration:", err);
+      const file = await response.blob();
+      if (!file.size) throw new Error("The download service returned an empty file.");
+      const objectUrl = URL.createObjectURL(file);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = getDownloadFilename(response, `book-${bookId}`);
+      link.hidden = true;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+
+      let completionResponse;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          completionResponse = await postAction("complete");
+          if (completionResponse.ok) break;
+        } catch (error) {
+          if (attempt === 1) throw error;
+        }
+      }
+      if (!completionResponse?.ok) {
+        const result = await completionResponse?.json().catch(() => null);
+        throw new Error(result?.error || "The downloaded file could not be recorded.");
+      }
+
+      await updateBookDownloadCount(bookId);
+      window.showToast("Your download is ready.", "success");
+      return true;
+    } catch (error) {
+      if (reservationMade) {
+        await postAction("fail").catch((releaseError) => {
+          console.error("[BOOK DOWNLOAD] Could not release failed download:", releaseError);
+        });
+      }
+      throw error;
     }
-  } else {
-    console.log("[Analytics] Download already counted in this session");
+  })();
+
+  activeBookDownloads.set(bookId, request);
+  try {
+    return await request;
+  } catch (error) {
+    console.error("[BOOK DOWNLOAD] Download failed:", error);
+    window.showError(error.message || "The book could not be downloaded.");
+    return false;
+  } finally {
+    activeBookDownloads.delete(bookId);
+    window.dispatchEvent(new CustomEvent("mebv:book-download-settled"));
   }
-  
-  console.log("[Analytics] Download started");
 }
+
+window.downloadBookFile = downloadBookFile;
+window.trackDownload = (bookId) => downloadBookFile(bookId);
+window.hasActiveBookDownload = () => activeBookDownloads.size > 0;
 
 /**
  * Submit user assessment/review details for a curriculum book
@@ -230,32 +317,85 @@ window.trackDownload = trackDownload;
 window.submitReview = submitReview;
 /* --- DYNAMIC RENDERING OVERRIDES: APPLIES TO ALL OLD & NEW DATA --- */
 
-const unavailableBookPreview = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
-  '<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1000" viewBox="0 0 720 1000"><rect width="720" height="1000" fill="#eef1f5"/><rect x="42" y="42" width="636" height="916" rx="18" fill="#f8fafc" stroke="#cbd5e1" stroke-width="4"/><text x="360" y="490" text-anchor="middle" font-family="Arial,sans-serif" font-size="34" fill="#64748b">Preview unavailable</text></svg>'
-)}`;
-
 function getProfessionalPreview(book) {
   const coverUrl = String(book?.cover_url || "").trim();
-  if (!coverUrl || /(?:^|\/)LOGO\.png(?:$|[?#])/i.test(coverUrl) || /drive\.google\.com\/thumbnail\?/i.test(coverUrl)) {
-    return unavailableBookPreview;
+  if (!coverUrl ||
+    /^(?:unavailable|failed|preview_unavailable|cover_failed|cover_unavailable)$/i.test(coverUrl) ||
+    /(?:^|\/)(?:logo|icon)\.(?:png|jpe?g|webp)(?:$|[?#])/i.test(coverUrl) ||
+    /drive\.google\.com\/thumbnail\?/i.test(coverUrl)) return "";
+  try {
+    const url = new URL(coverUrl);
+    if (!["http:", "https:"].includes(url.protocol)) return "";
+  } catch {
+    return "";
   }
   return coverUrl.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+
+function getBookPreviewStatus(book) {
+  const coverUrl = String(book?.cover_url || "").trim();
+  if (/(?:^|\/)(?:logo|icon)\.(?:png|jpe?g|webp)(?:$|[?#])/i.test(coverUrl)) {
+    return "The saved cover URL points to a site icon, not a book preview.";
+  }
+  if (/drive\.google\.com\/thumbnail\?/i.test(coverUrl)) {
+    return "The saved Drive thumbnail is not a book cover. Use the first-page sync or the download option.";
+  }
+  if (coverUrl && !getProfessionalPreview(book)) {
+    return "The saved cover URL is invalid. Try the download option to open the original file.";
+  }
+
+  const sourceUrls = [book?.drive_url, book?.download_url]
+    .map(value => String(value || "").trim())
+    .filter(Boolean);
+  if (!sourceUrls.length) return "No source file link is saved for this book.";
+  if (typeof window.getGoogleDriveFileId === "function" &&
+    !sourceUrls.some(sourceUrl => window.getGoogleDriveFileId(sourceUrl))) {
+    return "The saved link does not identify a supported Google Drive file. Downloads may fail.";
+  }
+  return "A first-page preview has not been generated. Use Download Book to open the source file.";
+}
+
+function escapeBookPreviewText(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+window.renderBookCoverPreview = function(book, alt, variant = "card") {
+  const isCard = variant === "card";
+  const className = isCard ? "card-img book-cover-image" : "book-cover-modal-image";
+  const statusClass = isCard ? "book-preview-status book-preview-status--card" : "book-preview-status book-preview-status--modal";
+  const style = isCard ? "" : ' style="width:120px;aspect-ratio:3/4;object-fit:contain;background:var(--bg-tertiary);border-radius:var(--border-radius-md);"';
+  const coverUrl = getProfessionalPreview(book);
+  if (!coverUrl) {
+    return `<div class="${statusClass}" role="status"${style}>${escapeBookPreviewText(getBookPreviewStatus(book))}</div>`;
+  }
+  return `<img src="${coverUrl}" alt="${escapeBookPreviewText(alt)}" class="${className}" data-preview-variant="${variant}" onerror="window.handleBookCoverPreviewError(this)"${style}>`;
+};
+
+window.handleBookCoverPreviewError = function(image) {
+  const isCard = image.dataset.previewVariant === "card";
+  const fallback = document.createElement("div");
+  fallback.className = isCard ? "book-preview-status book-preview-status--card" : "book-preview-status book-preview-status--modal";
+  fallback.setAttribute("role", "status");
+  fallback.textContent = "The saved cover image could not be loaded. Try Download Book; the source link is unchanged.";
+  if (!isCard) {
+    fallback.style.cssText = "width:120px;aspect-ratio:3/4;display:grid;place-items:center;padding:.5rem;text-align:center;background:var(--bg-tertiary);border-radius:var(--border-radius-md);";
+  }
+  image.replaceWith(fallback);
+};
 window.getBookCoverPreview = getProfessionalPreview;
+window.getBookPreviewStatus = getBookPreviewStatus;
 
 /**
  * Handle card download events with direct integration to analytics.
  */
-window.executeQuickDownload = function(event, bookId, downloadUrl) {
+window.executeQuickDownload = function(event, bookId) {
     if(event) event.stopPropagation(); // Stop details modal from opening
-    if (!downloadUrl || downloadUrl === "#") {
-        window.showToast("File link not found", "error");
-        return;
-    }
-    window.showToast("Preparing your file...", "success");
-    // Directly invoke your existing counter and analytics logic
-    window.trackDownload(bookId);
-    window.open(downloadUrl, '_blank');
+    window.downloadBookFile(bookId);
 };
 
 /**
@@ -291,66 +431,3 @@ const originalLoadBooks = window.loadBooks;
 window.loadBooks = function(...args) {
     return safeExecute(() => originalLoadBooks(...args));
 };
-/**
- * RE-IMPLEMENTATION: Atomic Download Tracker with Cooldown
- * This replaces the previous trackDownload behavior with professional-grade accuracy.
- */
-(function() {
-    // Persistent memory to handle the 5-second per-book cooldown
-    const activeCooldowns = new Set();
-
-    window.trackDownload = async function(bookId) {
-        if (!bookId || !window.supabaseClient) return;
-
-        // 1. Check for Duplicate Counting (5-second logic)
-        if (activeCooldowns.has(bookId)) {
-            console.log("[Analytics] Cooldown active for book:", bookId);
-            return; 
-        }
-
-        // Add to cooldown set
-        activeCooldowns.add(bookId);
-        setTimeout(() => activeCooldowns.delete(bookId), 5000);
-
-        try {
-            // Get user if logged in
-            const { data: { session } } = await window.supabaseClient.auth.getSession();
-            const userId = session?.user?.id || null;
-
-            // 2. Perform ATOMIC update on server side
-            const { error } = await window.supabaseClient.rpc('increment_book_download_atomic', {
-                target_book_id: bookId,
-                current_user_id: userId
-            });
-
-            if (error) throw error;
-
-            // 3. IMMEDIATE UI UPDATE (No refresh)
-            // This selects all elements displaying downloads for this book ID
-            const uiSelectors = [
-                `#book-downloads-${bookId}`,             // Matches old cards
-                `[data-download-count-for="${bookId}"]`   // Universal data attribute
-            ];
-
-            uiSelectors.forEach(selector => {
-                const elements = document.querySelectorAll(selector);
-                elements.forEach(el => {
-                    let currentVal = parseInt(el.textContent.replace(/[^0-9]/g, "")) || 0;
-                    // Directly increment by exactly 1
-                    const newVal = currentVal + 1;
-                    
-                    // Update text while preserving strings like " Downloads" or " DLs"
-                    if (el.classList.contains('mebv-counts')) {
-                        el.textContent = `${newVal} Downloads`;
-                    } else {
-                        el.textContent = newVal;
-                    }
-                });
-            });
-
-        } catch (err) {
-            console.error("[Analytics Error] Download count failed:", err);
-            // Optional: Show error only if it's a real failure, not just a block
-        }
-    };
-})();

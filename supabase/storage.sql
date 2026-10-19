@@ -149,7 +149,7 @@ payment_slips/
 cms_assets/
   ├── books/
       ├── covers/
-      │   └── book-{id}.jpg
+      │   └── {book-id}/cover.png
       └── files/
           └── book-{id}.pdf
   ├── videos/

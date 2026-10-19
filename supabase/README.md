@@ -145,6 +145,45 @@ cms_assets/
 
 ---
 
+### Document rendering and book covers
+
+The `document-renderer` service in the repository performs real first-page, first-slide, first-worksheet, EPUB-cover/content-page, and image previews, and uses OCR when a document has no extractable text. It requires LibreOffice, Poppler, Tesseract, and the pinned Python packages in its Docker image. Deploy it on a private, HTTPS-enabled host reachable from Supabase Edge Functions; do not expose it without the shared bearer token.
+
+Before deploying the updated functions, run the contents of `migrations/20260420000000_books_document_metadata.sql` in the Supabase Dashboard SQL Editor. The migration adds the Drive file ID, source URL, MIME type, and byte-size fields to `public.books`; `download_url` remains the existing download field.
+
+From the repository root, build and run the renderer on its host:
+
+```sh
+export DOCUMENT_RENDERER_TOKEN="$(openssl rand -hex 32)"
+docker build -t mebv-document-renderer ./document-renderer
+docker run -d --name mebv-document-renderer \
+  --memory=1g --cpus=2 \
+  -p 8080:8080 \
+  -e DOCUMENT_RENDERER_TOKEN="$DOCUMENT_RENDERER_TOKEN" \
+  mebv-document-renderer
+```
+
+Configure these Supabase Edge Function secrets (use the renderer's externally reachable HTTPS URL):
+
+```sh
+supabase secrets set \
+  DOCUMENT_RENDERER_URL=https://renderer.example.com \
+  DOCUMENT_RENDERER_TOKEN="$DOCUMENT_RENDERER_TOKEN"
+supabase secrets set GOOGLE_API_KEY="$GOOGLE_API_KEY"
+```
+
+Replace the example renderer hostname and set `GOOGLE_API_KEY` in the deployment shell to the existing server-side key (or use `GOOGLE_DRIVE_API_KEY`). The key must be allowed to read/export the Drive files. Ensure the existing `cms_assets` bucket is public. Deploy the updated Edge Functions after configuring the secrets:
+
+```sh
+supabase functions deploy scan-drive-folder
+supabase functions deploy extract-book-metadata
+supabase functions deploy sync-book-cover
+```
+
+The renderer accepts files up to 25 MB and returns an explicit per-file error when content validation or conversion fails. It does not scrape Drive HTML or use Drive thumbnail URLs.
+
+---
+
 ### 6. admin_setup.sql (150 lines)
 **What it does**: Promotes manually created admin user to super_admin
 
@@ -422,3 +461,122 @@ const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 **Version**: 1.0  
 **Last Updated**: 2026-06-07  
 **Status**: Production-Ready ✅
+
+---
+
+## Anonymous book downloads
+
+`download-book` proxies Google Drive downloads through Supabase. Anonymous visitors
+receive three successful downloads per persistent browser visitor ID; a download is
+recorded only after the browser receives the complete file and confirms completion.
+Authenticated users continue without the anonymous quota. The tracking tables are
+not exposed to browser roles; the Edge Function uses the service-role key server-side.
+
+Apply `migrations/20261009000000_book_download_limits.sql` in the Supabase SQL Editor
+before deploying the function. Configure the existing server-side `GOOGLE_API_KEY`
+(or `GOOGLE_DRIVE_API_KEY`) and Supabase function secrets, then deploy:
+
+```sh
+supabase functions deploy download-book --project-ref tengzploljdireajaxwx
+```
+
+Deploy the updated `books.html`, `books.js`, `app.js`, and `style.css` through the
+existing Cloudflare Pages workflow. The return-refresh prompt's inactivity threshold
+is `RETURN_REFRESH_INACTIVITY_MS` in `app.js` (30 minutes).
+
+## Push notification database foundation
+
+After applying `migrations/20261009125000_prevent_profile_role_escalation.sql`,
+apply `migrations/20261009130000_push_notifications_foundation.sql` to add private
+subscription storage, the notification outbox, delivery tracking, persistent
+first-publication deduplication, and the Admin/Super Admin-only manual enqueue RPC.
+The service-role-only `prepare_push_deliveries` function snapshots active eligible
+recipients idempotently; `general` bypasses category preferences, while other
+categories require an explicit preference. Then apply
+`migrations/20261009140000_push_delivery_worker.sql` for dispatch leases, atomic rate
+limits, retries, and authenticated server-only worker RPCs. The migrations remain
+forward-only; do not grant browser roles direct access to push tables.
+`public.push_subscriptions` is created by the `20261009130000` foundation migration;
+the `20261009140000` worker migration alters it and must not be run by itself or
+before the foundation. The worker migration now fails with an explicit dependency
+message when the foundation tables are absent.
+
+The `push-api` and `push-dispatcher` Edge Functions encrypt endpoints and Web Push
+keys using AES-256-GCM before storage, and use VAPID for delivery. Configure these
+Edge Function secrets in Supabase:
+
+- `PUSH_ALLOWED_ORIGINS`: comma-separated exact HTTPS origin(s) for the deployed
+  MEBV site. `http://127.0.0.1:5500` and `http://localhost:5500` are explicitly
+  allowlisted in code for development. Add the actual Cloudflare Pages/custom
+  domain origin; paths, wildcards, and arbitrary preview hosts are rejected.
+- `PUSH_ENCRYPTION_KEY`: base64 encoding of 32 cryptographically random bytes.
+- `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY`: a matching Web Push VAPID pair.
+- `VAPID_SUBJECT`: a verified contact URI, such as `mailto:notifications@example.com`.
+- `PUSH_DISPATCH_SECRET`: a separate cryptographically random bearer secret for the
+  scheduled dispatcher endpoint.
+- Supabase supplies `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and
+  `SUPABASE_SERVICE_ROLE_KEY` to Edge Functions; never put service-role or private
+  VAPID/encryption keys in the frontend.
+
+Use a contact address that the service operator controls for `VAPID_SUBJECT`.
+The push dispatcher is not self-scheduling: configure a trusted external scheduler
+to call its endpoint once per minute, or queued pushes and expiry cleanup will wait
+until a dispatcher request arrives.
+
+Example secret generation and upload from Git Bash (keep values only in the local
+deployment shell; do not paste them into source files):
+
+```sh
+export PUSH_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+export PUSH_DISPATCH_SECRET="$(openssl rand -hex 32)"
+VAPID_KEYS="$(npx --yes web-push generate-vapid-keys --json)"
+export VAPID_PUBLIC_KEY="$(node -e 'console.log(JSON.parse(process.argv[1]).publicKey)' "$VAPID_KEYS")"
+export VAPID_PRIVATE_KEY="$(node -e 'console.log(JSON.parse(process.argv[1]).privateKey)' "$VAPID_KEYS")"
+export VAPID_SUBJECT="mailto:notifications@example.com"
+supabase secrets set --project-ref tengzploljdireajaxwx \
+  PUSH_ALLOWED_ORIGINS="https://<actual-production-origin>" \
+  PUSH_ENCRYPTION_KEY="$PUSH_ENCRYPTION_KEY" \
+  PUSH_DISPATCH_SECRET="$PUSH_DISPATCH_SECRET" \
+  VAPID_PUBLIC_KEY="$VAPID_PUBLIC_KEY" \
+  VAPID_PRIVATE_KEY="$VAPID_PRIVATE_KEY" \
+  VAPID_SUBJECT="$VAPID_SUBJECT"
+```
+
+Deploy migrations only after reviewing the linked project's migration history.
+`supabase db push --linked` applies all unapplied repository migrations, so verify
+every pending entry before confirming the command. Deploy the functions with JWT
+gateway verification disabled because `push-api` validates user JWTs itself and the
+dispatcher authenticates its dedicated secret:
+
+```sh
+supabase link --project-ref tengzploljdireajaxwx
+supabase migration list --linked
+supabase db push --linked
+supabase functions deploy push-api --no-verify-jwt --project-ref tengzploljdireajaxwx
+supabase functions deploy push-dispatcher --no-verify-jwt --project-ref tengzploljdireajaxwx
+```
+
+The Supabase gateway must pass `OPTIONS` through to the function. Keep
+`verify_jwt = false` for these two endpoints and deploy with `--no-verify-jwt`;
+`push-api` validates signed-in JWTs itself with Supabase Auth and its manual-send RPC
+checks the caller's current database role. Anonymous subscription operations remain
+available, and the dispatcher checks its independent bearer secret. CORS only allows
+the two explicit local origins plus exact origins listed in `PUSH_ALLOWED_ORIGINS`.
+The repository does not contain the deployed MEBV Pages hostname, so set the actual
+production origin there before serving browser requests from the deployed site.
+
+Configure a trusted scheduler to POST once per minute to
+`https://tengzploljdireajaxwx.supabase.co/functions/v1/push-dispatcher` with
+`Authorization: Bearer <PUSH_DISPATCH_SECRET>` and JSON body `{"limit":25}`. The
+secret must be configured in the scheduler without logging its value. The handler
+uses durable delivery rows, retries transient provider errors, and disables
+subscriptions after provider `404`/`410` responses. Web Push cannot guarantee
+exactly-once delivery if a provider accepts a push but its response is lost.
+
+The admin blog form now inserts a draft and, when “Publish now” is selected, updates
+it to `published`; the trigger enqueues only that first successful transition.
+Deploy the manifest, root service worker, generated logo icon variants, shared PWA
+UI, and all updated HTML pages with the existing Cloudflare Pages site. Notifications
+and installation require HTTPS on the production origin; test the dispatcher,
+browser permission flow, role restrictions, and paid lesson/download navigation in
+staging before production.

@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Books - Malawi Education Books and Vacancies</title>
   <link rel="icon" type="image/png" href="LOGO.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#0284c7">
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
@@ -65,14 +68,14 @@
       </div>
     </section>
 
-    <section style="margin-top: 2rem;">
+    <section class="book-catalog-section book-catalog-section--featured">
       <h2 style="font-size: 1.75rem; font-weight: 800; margin-bottom: 1rem;">Featured Books</h2>
-      <div id="featured-books" class="grid-layout"></div>
+      <div id="featured-books" class="grid-layout book-catalog-grid"></div>
     </section>
 
-    <section style="margin-top: 3rem;">
+    <section class="book-catalog-section">
       <h2 style="font-size: 1.75rem; font-weight: 800; margin-bottom: 1rem;">All Books</h2>
-      <div id="books-list" class="grid-layout"></div>
+      <div id="books-list" class="grid-layout book-catalog-grid"></div>
     </section>
 
     <!-- Floating Advertisements -->
@@ -88,7 +91,7 @@
       </div>
       <div class="modal-body" id="book-modal-body"></div>
       <div class="modal-footer" style="flex-direction: column; align-items: stretch; gap: 1rem;">
-        <a id="book-download-link" href="#" class="btn btn-primary btn-block" target="_blank" rel="noopener noreferrer">Download Book</a>
+        <a id="book-download-link" href="#" class="btn btn-primary btn-block">Download Book</a>
         <div id="review-form-wrapper" style="padding-top: 1rem; border-top: 1px solid var(--border-color);">
           <h3 style="font-size: 1.1rem; font-weight: 800; margin-bottom: 1rem;">Leave a Review</h3>
           <form id="book-review-form">
@@ -150,6 +153,7 @@
 
   <script src="supabase.js"></script>
   <script src="app.js"></script>
+  <script src="push-ui.js"></script>
   <script src="auth.js"></script>
   <script src="books.js"></script>
   <script>
@@ -185,7 +189,7 @@
       }
     }
 
-    document.addEventListener("DOMContentLoaded", () => {
+    document.addEventListener("DOMContentLoaded", async () => {
       const searchInput = document.getElementById("book-search");
       const categorySelect = document.getElementById("book-category");
       const reviewForm = document.getElementById("book-review-form");
@@ -195,8 +199,10 @@
       reviewForm.addEventListener("submit", handleReviewSubmit);
 
       renderRatingStars();
-      window.loadBooks();
+      await window.loadBooks();
       window.loadFeaturedBooks();
+      const bookId = new URLSearchParams(window.location.search).get("id");
+      if (bookId) await openBookDetails(bookId);
     });
 
     function renderFeaturedBooks(books) {
@@ -211,7 +217,7 @@
         card.className = "card";
         card.innerHTML = `
           <div class="card-img-wrapper">
-            <img src="${getProfessionalPreview(book)}" alt="${escapeHtml(book.title)} cover" class="card-img book-cover-image" onerror="this.onerror=null;this.src='${getProfessionalPreview({})}'">
+            ${window.renderBookCoverPreview(book, book.title + " cover")}
           </div>
           <div class="card-content">
             <p class="card-badge">Featured</p>
@@ -240,7 +246,7 @@
         card.className = "card";
         card.innerHTML = `
           <div class="card-img-wrapper">
-            <img src="${getProfessionalPreview(book)}" alt="${escapeHtml(book.title)} cover" class="card-img book-cover-image" onerror="this.onerror=null;this.src='${getProfessionalPreview({})}'">
+            ${window.renderBookCoverPreview(book, book.title + " cover")}
           </div>
           <div class="card-content">
             <p class="book-card-meta">${escapeHtml(book.category || 'General')} &bull; ${escapeHtml(book.author || 'Unknown')}</p>
@@ -269,21 +275,17 @@
         currentBookId = book.id;
         document.getElementById("book-modal-title").textContent = book.title;
         document.getElementById("book-modal-meta").textContent = `${book.category || 'General'} • ${book.author || 'Unknown author'}`;
-        document.getElementById("book-download-link").href = window.convertGoogleDriveLink(book.download_url || "#");
-        document.getElementById("book-download-link").onclick = (event) => {
-          if (!book.download_url) {
-            event.preventDefault();
-            window.showError("Download link is not available.");
-            return;
-          }
-          window.trackDownload(book.id);
+        const downloadLink = document.getElementById("book-download-link");
+        downloadLink.onclick = (event) => {
+          event.preventDefault();
+          window.downloadBookFile(book.id);
         };
 
         const body = document.getElementById("book-modal-body");
         body.innerHTML = `
           <div style="display: grid; gap: 1.25rem;">
             <div style="display: flex; flex-wrap: wrap; gap: 1.25rem;">
-              <img src="${getProfessionalPreview(book)}" onerror="this.onerror=null;this.src='${getProfessionalPreview({})}'" alt="${escapeHtml(book.title)}" style="width: 120px; aspect-ratio: 3 / 4; object-fit: contain; background: var(--bg-tertiary); border-radius: var(--border-radius-md);">
+              ${window.renderBookCoverPreview(book, book.title, "modal")}
               <div style="flex: 1; min-width: 190px;">
                 <p style="margin-bottom: 0.5rem; color: var(--text-secondary);">${escapeHtml(book.description || 'Book details are not available.')}</p>
                 <div class="book-card-meta">
@@ -417,11 +419,10 @@ window.renderFeaturedBooks = function(books) {
     books.forEach(book => {
         const card = document.createElement("article");
         card.className = "card";
-        const highResCover = getProfessionalPreview(book);
 
         card.innerHTML = `
           <div class="card-img-wrapper">
-            <img src="${highResCover}" alt="${escapeHtml(book.title)}" class="card-img book-cover-image" onerror="this.onerror=null;this.src='${getProfessionalPreview({})}'" loading="lazy">
+            ${window.renderBookCoverPreview(book, book.title + " cover")}
             <p class="card-badge">Featured</p>
           </div>
           <div class="card-content">
@@ -435,7 +436,7 @@ window.renderFeaturedBooks = function(books) {
 
             <div class="mebv-card-footer">
               <button class="btn btn-outline btn-sm" onclick="openBookDetails('${book.id}')">📖 Details</button>
-              <button class="btn btn-primary btn-sm" onclick="executeQuickDownload(event, '${book.id}', '${book.download_url}')">⬇ Download</button>
+              <button class="btn btn-primary btn-sm" onclick="executeQuickDownload(event, '${book.id}')">⬇ Download</button>
             </div>
           </div>
         `;
@@ -456,11 +457,10 @@ window.renderBooksList = function(books) {
     books.forEach(book => {
         const card = document.createElement("article");
         card.className = "card";
-        const highResCover = getProfessionalPreview(book);
 
         card.innerHTML = `
           <div class="card-img-wrapper">
-            <img src="${highResCover}" alt="${escapeHtml(book.title)}" class="card-img book-cover-image" onerror="this.onerror=null;this.src='${getProfessionalPreview({})}'" loading="lazy">
+            ${window.renderBookCoverPreview(book, book.title + " cover")}
           </div>
           <div class="card-content">
             <p class="book-card-meta">${escapeHtml(book.category || 'Books')} &bull; ${escapeHtml(book.author || 'Admin')}</p>
@@ -473,7 +473,7 @@ window.renderBooksList = function(books) {
 
             <div class="mebv-card-footer">
               <button class="btn btn-outline btn-sm" onclick="openBookDetails('${book.id}')">📖 Details</button>
-              <button class="btn btn-primary btn-sm" onclick="executeQuickDownload(event, '${book.id}', '${book.download_url}')">⬇ Download</button>
+              <button class="btn btn-primary btn-sm" onclick="executeQuickDownload(event, '${book.id}')">⬇ Download</button>
             </div>
           </div>
         `;

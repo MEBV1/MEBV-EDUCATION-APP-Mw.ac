@@ -37,11 +37,13 @@ async function loadLessons() {
     updateProgressSummary();
 
     // Determine which lesson to show
+    const requestedLessonId = new URLSearchParams(window.location.search).get("id");
+    const requestedLesson = lessonsList.find(lesson => lesson.id === requestedLessonId);
     const lastLessonId = localStorage.getItem('mebv_python_last_lesson_id');
-    const resumeLesson = lessonsList.find(l => l.id === lastLessonId) || lessonsList[0];
+    const resumeLesson = requestedLesson || lessonsList.find(l => l.id === lastLessonId) || lessonsList[0];
     
     if (resumeLesson) {
-      selectLesson(resumeLesson);
+      await selectLessonById(resumeLesson.id);
     }
   } finally {
     window.hideLoading();

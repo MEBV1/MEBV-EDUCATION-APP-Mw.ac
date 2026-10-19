@@ -1,8 +1,10 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { getDocument } from "npm:pdfjs-dist@4.10.38/legacy/build/pdf.mjs";
-import mammoth from "npm:mammoth@1.8.0";
-import * as XLSX from "npm:xlsx@0.18.5";
-import JSZip from "npm:jszip@3.10.1";
+import {
+  classifyDocument,
+  downloadDriveDocument,
+  getDriveDocument,
+  renderDocument
+} from "../_shared/drive-documents.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -29,18 +31,15 @@ function json(body: unknown, status = 200) {
   });
 }
 
-function driveId(url: string) {
-  const match = url.match(/(?:\/file\/d\/|\/document\/d\/|\/presentation\/d\/|\/spreadsheets\/d\/|[?&]id=|\/uc\?export=download&id=)([-\w]{15,})/);
-  return match?.[1] || url.match(/[-\w]{25,}/)?.[0] || null;
-}
-
-function isGoogleUrl(value: string) {
+function driveId(value: string) {
   try {
-    const hostname = new URL(value).hostname.toLowerCase();
-    return hostname === "drive.google.com" || hostname.endsWith(".drive.google.com") ||
-      hostname === "docs.google.com" || hostname.endsWith(".docs.google.com");
-  } catch (_) {
-    return false;
+    const url = new URL(value);
+    if (!["drive.google.com", "docs.google.com"].includes(url.hostname.toLowerCase())) return null;
+    const match = url.pathname.match(/\/(?:file|document|presentation|spreadsheets)\/d\/([A-Za-z0-9_-]{10,})/i);
+    const id = match?.[1] || url.searchParams.get("id");
+    return id && /^[A-Za-z0-9_-]{10,}$/.test(id) ? id : null;
+  } catch {
+    return /^[A-Za-z0-9_-]{10,}$/.test(value) ? value : null;
   }
 }
 
@@ -49,24 +48,29 @@ function clean(value: string) {
 }
 
 function titleFromFilename(filename: string) {
-  return filename.replace(/\.(pdf|docx?|pptx?|xlsx?|txt|rtf)$/i, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+  return filename
+    .replace(/\.(pdf|docx?|pptx?|xlsx?|odt|ods|odp|epub|txt|rtf|jpe?g|png|webp|gif)$/i, "")
+    .replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function titleFromContent(text: string, filename: string) {
+  const match = text.match(/(?:book\s+)?title\s*[:\-]\s*([^\n]{3,150})/i);
+  return match?.[1] ? clean(match[1]) : titleFromFilename(filename);
 }
 
 function authorFrom(text: string) {
-  const patterns: RegExp[] = [
+  const patterns = [
     /(?:^|\n)\s*by\s+([^\n]{2,120})/i,
     /(?:^|\n)\s*authors?\s*[:\-]\s*([^\n]{2,120})/i,
     /(?:^|\n)\s*written\s+by\s+([^\n]{2,120})/i,
     /(?:^|\n)\s*prepared\s+by\s+([^\n]{2,120})/i,
     /(?:^|\n)\s*edited\s+by\s+([^\n]{2,120})/i
   ];
-
   for (const pattern of patterns) {
     const match = text.match(pattern);
     if (match?.[1]) return clean(match[1]).replace(/[|•].*$/g, "").trim();
   }
-
-  return "Not specified";
+  return "";
 }
 
 function subjectFrom(title: string, firstPage: string) {
@@ -85,10 +89,12 @@ function levelFrom(title: string, firstPage: string) {
     [/\bform\s+three\b/i, "Form 3"], [/\bform\s+four\b/i, "Form 4"],
     [/\bf1\b|\bform\s*1\b/i, "Form 1"], [/\bf2\b|\bform\s*2\b/i, "Form 2"],
     [/\bf3\b|\bform\s*3\b/i, "Form 3"], [/\bf4\b|\bform\s*4\b/i, "Form 4"],
-    [/\bjce\b/i, "JCE"], [ /\bmsce\b/i, "MSCE"]
+    [/\bjce\b/i, "JCE"], [/\bmsce\b/i, "MSCE"]
   ];
-  for (let number = 1; number <= 12; number += 1) patterns.push([new RegExp(`\\bstandard\\s+${number}\\b`, "i"), `Standard ${number}`]);
-  for (const [pattern, value] of patterns) if ((pattern as RegExp).test(source)) return value;
+  for (let number = 1; number <= 12; number += 1) {
+    patterns.push([new RegExp(`\\bstandard\\s+${number}\\b`, "i"), `Standard ${number}`]);
+  }
+  for (const [pattern, value] of patterns) if (pattern.test(source)) return value;
   return "";
 }
 
@@ -96,25 +102,24 @@ function publisherFrom(text: string) {
   const match = text.match(/(?:publisher|published\s+by|publishing\s+company|published\s+and\s+distributed\s+by)\s*[:\-]?\s*([^\n]{2,150})/i);
   if (match?.[1]) return clean(match[1]).replace(/[|•].*$/g, "").trim();
   const organization = text.match(/\b(?:ministry\s+of|government\s+of|malawi\s+institute|national\s+curriculum)\b[^\n]{0,120}/i);
-  return organization?.[0] ? clean(organization[0]) : "Not specified";
+  return organization?.[0] ? clean(organization[0]) : "";
 }
 
 function isbnFrom(text: string) {
   const match = text.match(/\bISBN(?:-1[03])?\s*[:\-]?\s*((?:97[89][\s-]?)?[0-9][0-9Xx](?:[\s-]?[0-9Xx]){8,16})\b/i);
-  return match?.[1]?.replace(/\s+/g, " ").trim() || "Not specified";
+  return match?.[1]?.replace(/\s+/g, " ").trim() || "";
 }
 
-function yearFrom(firstPage: string, fullText: string, info: Record<string, unknown>) {
+function yearFrom(text: string) {
   const patterns = [
     /(?:copyright|published|first\s+published|edition|©)\D{0,30}(19\d{2}|20\d{2})/i,
     /(19\d{2}|20\d{2})\D{0,20}(?:edition|copyright|published)/i
   ];
   for (const pattern of patterns) {
-    const match = firstPage.match(pattern) || fullText.match(pattern);
+    const match = text.match(pattern);
     if (match?.[1]) return Number(match[1]);
   }
-  const metadataYear = String(info.CreationDate || info.ModDate || "").match(/(19\d{2}|20\d{2})/);
-  return metadataYear ? Number(metadataYear[1]) : null;
+  return null;
 }
 
 function editionFrom(text: string) {
@@ -127,7 +132,7 @@ function editionFrom(text: string) {
     [/\bnew\s+edition\b/i, "New Edition"]
   ];
   for (const [pattern, value] of editions) if (pattern.test(text)) return value;
-  return "Not specified";
+  return "";
 }
 
 function languageFrom(text: string) {
@@ -135,128 +140,7 @@ function languageFrom(text: string) {
   if (/\bTumbuka\b/i.test(text)) return "Tumbuka";
   if (/\bYao\b/i.test(text)) return "Yao";
   if (/\bFrench\b/i.test(text)) return "French";
-  return "English";
-}
-
-function workspaceExport(url: string, fileId: string) {
-  if (/docs\.google\.com\/document/i.test(url)) return { url: `https://docs.google.com/document/d/${fileId}/export?format=docx`, extension: "docx" };
-  if (/docs\.google\.com\/presentation/i.test(url)) return { url: `https://docs.google.com/presentation/d/${fileId}/export/pptx`, extension: "pptx" };
-  if (/docs\.google\.com\/spreadsheets/i.test(url)) return { url: `https://docs.google.com/spreadsheets/d/${fileId}/export?format=xlsx`, extension: "xlsx" };
-  return { url: `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`, extension: "" };
-}
-
-function extensionOf(filename: string, contentType: string, fallback: string) {
-  const fromName = filename.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
-  if (fromName) return fromName;
-  if (contentType.includes("pdf")) return "pdf";
-  if (contentType.includes("wordprocessingml")) return "docx";
-  if (contentType.includes("presentationml")) return "pptx";
-  if (contentType.includes("spreadsheetml")) return "xlsx";
-  if (contentType.includes("text/plain")) return "txt";
-  if (contentType.includes("rtf")) return "rtf";
-  return fallback || "";
-}
-
-function extensionFromUrl(url: string) {
-  try {
-    return new URL(url).pathname.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() || "";
-  } catch (_) {
-    return "";
-  }
-}
-
-async function fetchDocument(sourceUrl: string, fileId: string) {
-  const target = workspaceExport(sourceUrl, fileId);
-  const url = target.url;
-  let result = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-  let bytes = new Uint8Array(await result.arrayBuffer());
-  let contentType = result.headers.get("content-type") || "";
-
-  if (!target.extension && !contentType.toLowerCase().includes("pdf")) {
-    const html = new TextDecoder().decode(bytes);
-    const token = html.match(/confirm=([0-9A-Za-z_]+)&/i)?.[1] || html.match(/name="confirm"\s+value="([^"]+)"/i)?.[1];
-    if (token) {
-      result = await fetch(`https://drive.usercontent.google.com/download?id=${encodeURIComponent(fileId)}&export=download&confirm=${encodeURIComponent(token)}`, { headers: { "User-Agent": "Mozilla/5.0" } });
-      bytes = new Uint8Array(await result.arrayBuffer());
-      contentType = result.headers.get("content-type") || "";
-    }
-  }
-
-  if (!result.ok || bytes.length === 0) {
-    throw new ExtractionError(404, "Google Drive file could not be accessed. Make sure the file is shared appropriately.");
-  }
-  if (contentType.toLowerCase().includes("text/html")) {
-    throw new ExtractionError(404, "Google Drive file could not be accessed. Make sure the file is shared appropriately.");
-  }
-  let filename = result.headers.get("content-disposition")?.match(/filename="?([^";]+)"?/i)?.[1] || "";
-  if (!filename) {
-    const page = await fetch(`https://drive.google.com/file/d/${encodeURIComponent(fileId)}/view`)
-      .then(item => item.text())
-      .catch(() => "");
-    filename = page.match(/<title>([^<]+?)\s*-\s*Google Drive<\/title>/i)?.[1]?.trim() || "";
-  }
-  const extension = extensionOf(filename, contentType, target.extension || extensionFromUrl(sourceUrl));
-  const mimeType = contentType.split(";")[0].trim() || "application/octet-stream";
-  if (!extension) throw new ExtractionError(400, "The document type could not be determined from Google Drive.");
-  return { bytes, filename, extension, mimeType };
-}
-
-async function pdfText(bytes: Uint8Array) {
-  const pdf = await getDocument({ data: bytes, useWorkerFetch: false, isEvalSupported: false, disableFontFace: true }).promise;
-  const pages: string[] = [];
-  for (let pageNumber = 1; pageNumber <= Math.min(pdf.numPages, 12); pageNumber += 1) {
-    const page = await pdf.getPage(pageNumber);
-    const content = await page.getTextContent();
-    pages.push(content.items.map((item: any) => item.str || "").join(" "));
-  }
-  const metadata = await pdf.getMetadata().catch(() => ({ info: {} }));
-  return { firstPage: clean(pages[0] || ""), fullText: clean(pages.join("\n")), info: metadata.info || {} };
-}
-
-function stripRtf(value: string) {
-  return clean(value.replace(/\\'[0-9a-f]{2}/gi, " ").replace(/\\[a-z]+\d* ?/gi, "").replace(/[{}]/g, ""));
-}
-
-async function zipXmlText(bytes: Uint8Array, names: string[]) {
-  const zip = await JSZip.loadAsync(bytes);
-  const values: string[] = [];
-  for (const name of names) {
-    const entry = zip.file(name);
-    if (!entry) continue;
-    const xml = await entry.async("text");
-    values.push(clean(xml.replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")));
-  }
-  return values.join("\n");
-}
-
-async function documentText(bytes: Uint8Array, extension: string) {
-  if (extension === "pdf") return pdfText(bytes);
-  if (extension === "docx") {
-    const result = await mammoth.extractRawText({ arrayBuffer: bytes.buffer as ArrayBuffer });
-    const text = clean(result.value || "");
-    return { firstPage: text.slice(0, 5000), fullText: text, info: {} };
-  }
-  if (extension === "pptx") {
-    const text = await zipXmlText(bytes, ["ppt/slides/slide1.xml", "ppt/slides/slide2.xml", "ppt/slides/slide3.xml"]);
-    return { firstPage: text.slice(0, 5000), fullText: text, info: {} };
-  }
-  if (extension === "xlsx") {
-    const workbook = XLSX.read(bytes, { type: "array" });
-    const text = workbook.SheetNames.map((name: string) => XLSX.utils.sheet_to_csv(workbook.Sheets[name])).join("\n");
-    return { firstPage: text.slice(0, 5000), fullText: text, info: {} };
-  }
-  if (extension === "txt") {
-    const text = clean(new TextDecoder().decode(bytes));
-    return { firstPage: text.slice(0, 5000), fullText: text, info: {} };
-  }
-  if (extension === "rtf") {
-    const text = stripRtf(new TextDecoder().decode(bytes));
-    return { firstPage: text.slice(0, 5000), fullText: text, info: {} };
-  }
-  if (["doc", "ppt", "xls"].includes(extension)) {
-    throw new ExtractionError(415, `Legacy ${extension.toUpperCase()} files cannot be extracted by this server. Save the book and add metadata manually.`);
-  }
-  throw new ExtractionError(415, `Unsupported document type: ${extension || "unknown"}. Save the book and add metadata manually.`);
+  return "";
 }
 
 Deno.serve(async (request) => {
@@ -265,50 +149,63 @@ Deno.serve(async (request) => {
 
   try {
     const authorization = request.headers.get("Authorization");
-    if (!authorization) return json({ success: false, error: "Authentication required" }, 401);
+    if (!authorization) throw new ExtractionError(401, "Authentication required.");
 
     const token = authorization.replace(/^Bearer\s+/i, "");
-    const client = createClient(supabaseUrl, supabaseAnonKey, { global: { headers: { Authorization: `Bearer ${token}` } } });
-    const { data: { user } } = await client.auth.getUser(token);
-    if (!user) return json({ success: false, error: "Invalid authentication token" }, 401);
+    const client = createClient(supabaseUrl, supabaseAnonKey, {
+      global: { headers: { Authorization: `Bearer ${token}` } }
+    });
+    const { data: { user }, error: userError } = await client.auth.getUser(token);
+    if (userError || !user) throw new ExtractionError(401, "Invalid authentication token.");
 
-    const { data: profile } = await client.from("profiles").select("role").eq("id", user.id).single();
-    if (!profile || !allowedRoles.includes(profile.role)) return json({ success: false, error: "Administrator access required" }, 403);
-
-    const body = await request.json().catch(() => null);
-    const downloadUrl = String(body?.driveUrl || body?.download_url || "").trim();
-    const fileId = driveId(downloadUrl) || String(body?.fileId || "").trim();
-    if (!downloadUrl || !isGoogleUrl(downloadUrl) || !fileId) {
-      return json({ success: false, error: "Enter a valid Google Drive, Docs, Slides, or Sheets link" }, 400);
+    const { data: profile, error: profileError } = await client.from("profiles").select("role").eq("id", user.id).single();
+    if (profileError || !profile || !allowedRoles.includes(profile.role)) {
+      throw new ExtractionError(403, "Administrator access required.");
     }
 
-    const downloaded = await fetchDocument(downloadUrl, fileId);
-    const extracted = await documentText(downloaded.bytes, downloaded.extension);
-    const fileName = downloaded.filename;
-    const title = titleFromFilename(fileName);
+    const body = await request.json().catch(() => null);
+    const driveUrl = String(body?.driveUrl || body?.download_url || body?.drive_url || "").trim();
+    const fileId = driveId(driveUrl) || driveId(String(body?.fileId || body?.drive_file_id || ""));
+    if (!fileId) throw new ExtractionError(400, "Enter a valid Google Drive, Docs, Slides, or Sheets link.");
+
+    const apiKey = Deno.env.get("GOOGLE_API_KEY") || Deno.env.get("GOOGLE_DRIVE_API_KEY");
+    if (!apiKey) throw new ExtractionError(500, "Google Drive API credential is not configured.");
+
+    const file = await getDriveDocument(fileId, apiKey);
+    const classification = classifyDocument(file.name, file.mimeType);
+    if (!classification.supported) throw new ExtractionError(415, classification.reason);
+
+    const source = await downloadDriveDocument(file, apiKey, classification.extension);
+    const rendered = await renderDocument(source.bytes, source.filename, source.contentType);
+    const fullText = clean(rendered.text);
+    const firstPage = clean(fullText.slice(0, 5000));
+    const title = titleFromContent(firstPage, file.name);
 
     return json({
       success: true,
-      file_id: fileId,
-      file_name: fileName,
-      mime_type: downloaded.mimeType,
-      extension: downloaded.extension,
-      cover_url: `https://drive.google.com/thumbnail?id=${encodeURIComponent(fileId)}&sz=w1600`,
+      file_id: file.id,
+      file_name: file.name,
+      mime_type: file.mimeType,
+      file_size: file.size || null,
+      extension: classification.extension,
+      drive_url: file.webViewLink,
+      cover_url: null,
       metadata: {
-        title: title || "",
-        author: authorFrom(extracted.firstPage),
-        subject: subjectFrom(title, extracted.firstPage),
-        educational_level: levelFrom(title, extracted.firstPage),
-        publisher: publisherFrom(extracted.firstPage),
-        isbn: isbnFrom(extracted.fullText),
-        year_published: yearFrom(extracted.firstPage, extracted.fullText, extracted.info),
-        edition: editionFrom(extracted.fullText),
-        language: languageFrom(extracted.firstPage)
+        title,
+        author: authorFrom(firstPage),
+        subject: subjectFrom(title, firstPage),
+        educational_level: levelFrom(title, firstPage),
+        publisher: publisherFrom(firstPage),
+        isbn: isbnFrom(fullText),
+        year_published: yearFrom(fullText),
+        edition: editionFrom(fullText),
+        language: languageFrom(firstPage)
       }
     });
   } catch (error) {
-    const status = error instanceof ExtractionError ? error.status : 500;
-    const message = error instanceof Error ? error.message : "Book information could not be extracted";
+    const status = error instanceof ExtractionError ? error.status : 422;
+    const message = error instanceof Error ? error.message : "Book information could not be extracted.";
+    if (!(error instanceof ExtractionError)) console.error("[BOOK METADATA] Processing error:", error);
     return json({ success: false, error: message }, status);
   }
 });

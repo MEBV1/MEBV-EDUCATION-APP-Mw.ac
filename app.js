@@ -48,8 +48,8 @@ function initRealtimeSubscriptions() {
       if (typeof window.loadServices === 'function') window.loadServices();
     })
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'books' }, (payload) => {
-      if (payload.new.featured !== payload.old.featured) {
-        console.log('Book featured status changed:', payload.new);
+      if (payload.new.featured !== payload.old.featured || payload.new.cover_url !== payload.old.cover_url) {
+        console.log('Book listing or cover changed:', payload.new.id);
         if (typeof window.loadFeaturedBooks === 'function') window.loadFeaturedBooks();
         if (typeof window.loadBooks === 'function') window.loadBooks();
       }
@@ -291,6 +291,46 @@ function initMobileMenu() {
   const navLinks = document.getElementById("nav-links");
 
   if (menuBtn && navLinks) {
+    const drawerActions = document.createElement("li");
+    drawerActions.className = "nav-drawer-actions";
+    navLinks.appendChild(drawerActions);
+
+    const actionPlaceholders = new Map();
+    const mobileViewport = window.matchMedia("(max-width: 768px)");
+    const syncDrawerActions = () => {
+      const actions = [
+        document.getElementById("header-auth-actions"),
+        document.querySelector(".pwa-header-actions")
+      ].filter(Boolean);
+
+      actions.forEach((action) => {
+        if (mobileViewport.matches) {
+          if (!actionPlaceholders.has(action)) {
+            const placeholder = document.createComment("header action position");
+            action.parentNode.insertBefore(placeholder, action);
+            actionPlaceholders.set(action, placeholder);
+          }
+          if (action.parentNode !== drawerActions) drawerActions.appendChild(action);
+        } else {
+          const placeholder = actionPlaceholders.get(action);
+          if (placeholder?.parentNode) {
+            placeholder.parentNode.insertBefore(action, placeholder);
+            placeholder.remove();
+            actionPlaceholders.delete(action);
+          }
+        }
+      });
+    };
+
+    const headerActions = document.querySelector(".header-actions");
+    const actionObserver = headerActions
+      ? new MutationObserver(syncDrawerActions)
+      : null;
+    actionObserver?.observe(headerActions, { childList: true });
+    mobileViewport.addEventListener("change", syncDrawerActions);
+    window.addEventListener("resize", syncDrawerActions);
+    syncDrawerActions();
+
     menuBtn.addEventListener("click", () => {
       navLinks.classList.toggle("active");
       menuBtn.textContent = navLinks.classList.contains("active") ? "✕" : "☰";
@@ -448,14 +488,16 @@ function hideHiddenAdminModal() {
   console.log("[Admin Modal] Modal hidden and fields cleared");
 }
 
-window.showAuthModal = function() {
+window.showAuthModal = function(reason = "") {
   const modal = document.getElementById("hidden-admin-modal-overlay");
   if (!modal) return;
   
   document.getElementById("hidden-admin-modal-title").textContent = "User Login / Register";
   document.getElementById("hidden-admin-modal-body").innerHTML = `
     <div style="display: flex; flex-direction: column; gap: 1rem;">
-      <p style="color: var(--text-secondary); text-align: center;">Please log in or register to access premium content.</p>
+      <p style="color: var(--text-secondary); text-align: center;">${reason === "download-limit"
+        ? "You have used your 3 free book downloads. Log in or create an account to continue downloading."
+        : "Please log in or register to access premium content."}</p>
       <form id="user-auth-form" style="display: flex; flex-direction: column; gap: 1rem;">
         <div class="form-group">
           <label style="display: block; margin-bottom: 0.5rem; font-weight: 600;">Email</label>
@@ -898,139 +940,168 @@ function runCoreStartup() {
 // Intercept existing DOMContentLoaded logic to use our wrapper
 document.addEventListener("DOMContentLoaded", runCoreStartup);
 /**
- * Smart Refresh Notification System Logic
+ * Mandatory refresh prompt for visits resumed after a long absence.
  */
 (function MEBV_RefreshSystem() {
-    // Current application hardcoded deployment version (Scenario 2)
-    // Update this string whenever you deploy new website code to trigger Scene 2
-    const CURRENT_DEPLOYMENT_VERSION = "2026.07.01.v1"; 
-    
-    let isModalOpen = false;
-    let refreshLockedUntil = 0; // Epoch for scenario 7
+    const RETURN_REFRESH_INACTIVITY_MS = 30 * 60 * 1000;
+    const LAST_ACTIVE_KEY = "mebv_last_active_at";
+    const LAST_HIDDEN_KEY = "mebv_last_hidden_at";
+    const REFRESHING_KEY = "mebv_refresh_in_progress";
+    const PROMPTED_KEY = "mebv_refresh_prompted";
+    const ACTIVITY_WRITE_INTERVAL_MS = 15_000;
+    let promptOpen = false;
+    let refreshStarted = false;
+    let lastActivityWrite = 0;
 
-    const injectModal = () => {
-        if (document.getElementById('refresh-overlay')) return;
-        const div = document.createElement('div');
-        div.id = 'refresh-overlay';
-        div.className = 'refresh-modal-overlay';
-        div.innerHTML = `
-            <div class="refresh-modal-box">
-                <h2 class="refresh-modal-title" id="refresh-title">Website Update Check</h2>
-                <p class="refresh-modal-message" id="refresh-message">Update notification details...</p>
-                <div class="refresh-modal-actions">
-                    <button class="btn btn-outline" id="refresh-btn-later">Later</button>
-                    <button class="btn btn-primary" id="refresh-btn-now">✅ Refresh Now</button>
-                </div>
-            </div>`;
-        document.body.appendChild(div);
-        
-        document.getElementById('refresh-btn-now').onclick = doHardRefresh;
-        document.getElementById('refresh-btn-later').onclick = dismissModal;
-    };
-
-    const showNotification = (title, msg) => {
-        // SCENARIO 6/7 check: Don't show if modal is already open in another tab
-        // and only one tab should trigger the popup
-        if (localStorage.getItem('refresh_modal_lock') === 'active') return;
-        
-        injectModal();
-        document.getElementById('refresh-title').textContent = title;
-        document.getElementById('refresh-message').textContent = msg;
-        document.getElementById('refresh-overlay').classList.add('active');
-        
-        localStorage.setItem('refresh_modal_lock', 'active'); // Lock Scenario 6
-        isModalOpen = true;
-    };
-
-    const dismissModal = () => {
-        const overlay = document.getElementById('refresh-overlay');
-        if (overlay) overlay.classList.remove('active');
-        isModalOpen = false;
-        localStorage.removeItem('refresh_modal_lock'); // Scenario 6
-        
-        // RESET 1 HOUR TIMER (Scenario 1 Requirement)
-        startOneHourTimer();
-    };
-
-    const doHardRefresh = () => {
-        localStorage.removeItem('refresh_modal_lock');
-        // Cache busting technique (Scenario 5)
-        const cacheBuster = `?u=${Date.now()}`;
-        window.location.href = window.location.origin + window.location.pathname + cacheBuster + window.location.hash;
-    };
-
-    // SCENARIO 1: One Hour Session Timer
-    const startOneHourTimer = () => {
-        setTimeout(() => {
-            showNotification(
-                "Website Update Check",
-                "You have been using this website for over one hour. Please refresh your browser to ensure you are using the latest version with all recent improvements."
-            );
-        }, 3600000); 
-    };
-
-    // Monitoring Scenarios (2, 3, 4)
-    const monitorChanges = async () => {
-        if (!window.supabaseClient) return;
-        
+    const readTimestamp = (key) => {
         try {
-            // SCENARIO 2, 3 & 4 (Automatic Detection via platform_settings)
-            const { data, error } = await window.supabaseClient
-                .from('platform_settings')
-                .select('*')
-                .eq('id', 'global')
-                .maybeSingle();
-            
-            if (error || !data) return;
-
-            const lastTimestampInBrowser = localStorage.getItem('last_known_content');
-            const lastBuildInBrowser = localStorage.getItem('last_known_build');
-            
-            // Initial/Scenario 4 (Returning Visitor) check
-            if (!lastBuildInBrowser) {
-                localStorage.setItem('last_known_build', CURRENT_DEPLOYMENT_VERSION);
-                localStorage.setItem('last_known_content', data.last_content_update);
-                return;
-            }
-
-            // Scenario 2/4 (Deployment mismatch)
-            if (lastBuildInBrowser !== CURRENT_DEPLOYMENT_VERSION) {
-                localStorage.setItem('last_known_build', CURRENT_DEPLOYMENT_VERSION);
-                showNotification("Website Update available", "A new version of the website is available. Please refresh to enjoy the latest improvements.");
-                return;
-            }
-
-            // Scenario 3 (Admin Published Content Detection)
-            if (lastTimestampInBrowser !== data.last_content_update && !isModalOpen) {
-                localStorage.setItem('last_known_content', data.last_content_update);
-                showNotification("New Content Published", "New content has just been published. Refresh now to see the latest updates.");
-            }
-
-        } catch (e) { console.warn("Refresh Check failed:", e); }
-    };
-
-    // Cross-tab Synchronization Listener (Scenario 6)
-    window.addEventListener('storage', (e) => {
-        if (e.key === 'refresh_modal_lock' && !e.newValue && isModalOpen) {
-            // Other tab refreshed, just sync UI if needed
-            document.getElementById('refresh-overlay').classList.remove('active');
+            const value = Number(localStorage.getItem(key));
+            return Number.isFinite(value) && value > 0 ? value : 0;
+        } catch (error) {
+            console.warn("[Refresh Prompt] Could not read visit state:", error);
+            return 0;
         }
-    });
-
-    // Start Processes
-    const startCheckSystem = () => {
-        // Start Hour Timer
-        startOneHourTimer();
-        // Check Build Mismatch immediately (Scenario 4)
-        monitorChanges();
-        // Poll for content changes every 30 seconds (Scenario 3 Requirement)
-        setInterval(monitorChanges, 30000); 
     };
 
-    // Only start once the Supabase setup fix from previous instruction is ready
-    if (window.supabaseClient) {
-        startCheckSystem();
-    } else {
-        window.addEventListener('supabaseReady', startCheckSystem, { once: true });
-    }
+    const writeTimestamp = (key, value) => {
+        try {
+            localStorage.setItem(key, String(value));
+            return true;
+        } catch (error) {
+            console.warn("[Refresh Prompt] Could not save visit state:", error);
+            return false;
+        }
+    };
+
+    const readSessionFlag = (key) => {
+        try {
+            return sessionStorage.getItem(key) === "true";
+        } catch (error) {
+            console.warn("[Refresh Prompt] Could not read tab state:", error);
+            return false;
+        }
+    };
+
+    const showMandatoryPrompt = () => {
+        if (promptOpen || refreshStarted || readSessionFlag(PROMPTED_KEY)) return;
+        if (typeof window.hasActiveBookDownload === "function" && window.hasActiveBookDownload()) return;
+
+        let overlay = document.getElementById("refresh-overlay");
+        if (!overlay) {
+            overlay = document.createElement("div");
+            overlay.id = "refresh-overlay";
+            overlay.className = "refresh-modal-overlay";
+            overlay.innerHTML = `
+                <section class="refresh-modal-box" role="alertdialog" aria-modal="true"
+                    aria-labelledby="refresh-title" aria-describedby="refresh-message">
+                    <h2 class="refresh-modal-title" id="refresh-title">Refresh Required</h2>
+                    <p class="refresh-modal-message" id="refresh-message">
+                        You have been away for a while. Refresh the application to continue.
+                    </p>
+                    <div class="refresh-modal-actions">
+                        <button class="btn btn-primary" id="refresh-btn-now" type="button">Refresh Now</button>
+                    </div>
+                </section>`;
+            document.body.appendChild(overlay);
+            overlay.addEventListener("click", (event) => event.stopPropagation());
+            document.addEventListener("keydown", (event) => {
+                if (!promptOpen) return;
+                if (event.key === "Escape") event.preventDefault();
+                if (event.key === "Tab") {
+                    event.preventDefault();
+                    document.getElementById("refresh-btn-now")?.focus();
+                }
+            });
+            document.getElementById("refresh-btn-now").addEventListener("click", () => {
+                if (refreshStarted) return;
+                refreshStarted = true;
+                try {
+                    sessionStorage.setItem(REFRESHING_KEY, "true");
+                    localStorage.setItem(PROMPTED_KEY, "true");
+                } catch (error) {
+                    console.warn("[Refresh Prompt] Could not save refresh state:", error);
+                }
+                window.location.reload();
+            });
+        }
+
+        promptOpen = true;
+        try {
+            sessionStorage.setItem(PROMPTED_KEY, "true");
+        } catch (error) {
+            console.warn("[Refresh Prompt] Could not save prompt state:", error);
+        }
+        overlay.classList.add("active");
+        document.getElementById("refresh-btn-now")?.focus();
+    };
+
+    const checkReturn = () => {
+        if (document.visibilityState === "hidden" || promptOpen || refreshStarted) return;
+
+        try {
+            if (sessionStorage.getItem(REFRESHING_KEY) === "true") {
+                sessionStorage.removeItem(REFRESHING_KEY);
+                sessionStorage.removeItem(PROMPTED_KEY);
+                writeTimestamp(LAST_ACTIVE_KEY, Date.now());
+                localStorage.removeItem(LAST_HIDDEN_KEY);
+                return;
+            }
+        } catch (error) {
+            console.warn("[Refresh Prompt] Could not restore refresh state:", error);
+        }
+
+        const lastHiddenAt = readTimestamp(LAST_HIDDEN_KEY);
+        const lastActiveAt = readTimestamp(LAST_ACTIVE_KEY);
+        const lastSeenAt = lastHiddenAt || lastActiveAt;
+        if (!lastSeenAt) {
+            writeTimestamp(LAST_ACTIVE_KEY, Date.now());
+            return;
+        }
+
+        if (Date.now() - lastSeenAt >= RETURN_REFRESH_INACTIVITY_MS) {
+            showMandatoryPrompt();
+            return;
+        }
+
+        writeTimestamp(LAST_ACTIVE_KEY, Date.now());
+        try {
+            localStorage.removeItem(LAST_HIDDEN_KEY);
+        } catch (error) {
+            console.warn("[Refresh Prompt] Could not clear return timestamp:", error);
+        }
+    };
+
+    const recordHiddenTime = () => {
+        if (document.visibilityState !== "hidden") return;
+        writeTimestamp(LAST_HIDDEN_KEY, Date.now());
+    };
+
+    const recordPageHideTime = () => {
+        writeTimestamp(LAST_HIDDEN_KEY, Date.now());
+    };
+
+    const recordActivity = () => {
+        if (document.visibilityState === "hidden" || promptOpen) return;
+        const now = Date.now();
+        try {
+            localStorage.removeItem(LAST_HIDDEN_KEY);
+        } catch (error) {
+            console.warn("[Refresh Prompt] Could not clear return timestamp:", error);
+        }
+        if (now - lastActivityWrite < ACTIVITY_WRITE_INTERVAL_MS) return;
+        lastActivityWrite = now;
+        writeTimestamp(LAST_ACTIVE_KEY, now);
+    };
+
+    document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "hidden") recordHiddenTime();
+        else checkReturn();
+    });
+    window.addEventListener("pagehide", recordPageHideTime);
+    window.addEventListener("pageshow", checkReturn);
+    window.addEventListener("pointerdown", recordActivity, { passive: true });
+    window.addEventListener("keydown", recordActivity, { passive: true });
+    window.addEventListener("touchstart", recordActivity, { passive: true });
+    window.addEventListener("mebv:book-download-settled", checkReturn);
+    checkReturn();
 })();

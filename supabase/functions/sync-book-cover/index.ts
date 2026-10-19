@@ -1,4 +1,12 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
+import {
+  base64ToBytes,
+  classifyDocument,
+  downloadDriveDocument,
+  DocumentRendererError,
+  getDriveDocument,
+  renderDocument
+} from "../_shared/drive-documents.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -12,6 +20,13 @@ const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
 const allowedRoles = ["admin", "super_admin", "content_manager"];
 const storageBucket = "cms_assets";
 const maxPreviewBytes = 10 * 1024 * 1024;
+const failedCoverStates = new Set([
+  "unavailable",
+  "failed",
+  "preview_unavailable",
+  "cover_failed",
+  "cover_unavailable"
+]);
 
 class CoverSyncError extends Error {
   status: number;
@@ -30,8 +45,13 @@ function json(body: unknown, status = 200) {
 }
 
 function getDriveFileId(value: string) {
+  const rawValue = value.trim();
+  if (/^[A-Za-z0-9_-]{10,}$/.test(rawValue)) return rawValue;
   try {
-    const url = new URL(value);
+    const url = new URL(rawValue);
+    if (!["drive.google.com", "docs.google.com", "drive.usercontent.google.com"].includes(url.hostname.toLowerCase())) {
+      return null;
+    }
     const pathMatch = url.pathname.match(/\/(?:file|document|presentation|spreadsheets)\/d\/([A-Za-z0-9_-]{10,})/i);
     const queryId = url.searchParams.get("id");
     const fileId = pathMatch?.[1] || queryId;
@@ -41,23 +61,41 @@ function getDriveFileId(value: string) {
   }
 }
 
-function isPersistentPreviewUrl(value: string, bookId: string) {
+function needsCoverSynchronization(value: unknown) {
+  const coverUrl = String(value || "").trim();
+  if (!coverUrl || failedCoverStates.has(coverUrl.toLowerCase())) return true;
+  try {
+    const url = new URL(coverUrl);
+    return url.protocol !== "https:" ||
+      url.origin === new URL(supabaseUrl).origin ||
+      /(?:^|\/)(?:logo|icon)\.(?:png|jpe?g|webp)$/i.test(url.pathname) ||
+      (url.hostname.toLowerCase() === "drive.google.com" && /\/thumbnail(?:$|\/)/i.test(url.pathname));
+  } catch {
+    return true;
+  }
+}
+
+async function isValidStoredCover(value: string) {
   try {
     const url = new URL(value);
-    return url.origin === new URL(supabaseUrl).origin &&
-      url.pathname.startsWith(`/storage/v1/object/public/${storageBucket}/books/covers/${bookId}.`);
+    if (url.protocol !== "https:" ||
+      url.origin !== new URL(supabaseUrl).origin ||
+      /(?:^|\/)(?:logo|icon)\.(?:png|jpe?g|webp)$/i.test(url.pathname) ||
+      /drive\.google\.com\/thumbnail/i.test(url.hostname + url.pathname)) {
+      return false;
+    }
+    const response = await fetch(url, {
+      method: "HEAD",
+      signal: AbortSignal.timeout(8000)
+    });
+    return response.ok && (response.headers.get("content-type") || "").toLowerCase().startsWith("image/");
   } catch {
     return false;
   }
 }
 
-async function driveErrorMessage(response: Response, apiKey: string) {
-  const payload = await response.json().catch(() => null);
-  const message = typeof payload?.error?.message === "string" ? payload.error.message : "";
-  return message ? message.replaceAll(apiKey, "[redacted]") : `Google Drive API returned HTTP ${response.status}.`;
-}
-
 Deno.serve(async (request) => {
+  let fileName = "";
   if (request.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (request.method !== "POST") return json({ success: false, error: "Method not allowed" }, 405);
 
@@ -92,78 +130,113 @@ Deno.serve(async (request) => {
     });
     const { data: book, error: bookError } = await serviceClient
       .from("books")
-      .select("id,title,download_url,cover_url")
+      .select("id,title,download_url,drive_url,drive_file_id,cover_url")
       .eq("id", bookId)
       .maybeSingle();
     if (bookError) throw new CoverSyncError(500, `Could not read book record: ${bookError.message}`);
     if (!book) throw new CoverSyncError(404, "Book record was not found.");
 
     const currentCover = String(book.cover_url || "");
-    if (isPersistentPreviewUrl(currentCover, bookId)) {
-      try {
-        const existingPreview = await fetch(currentCover, { method: "HEAD" });
-        if (existingPreview.ok && (existingPreview.headers.get("content-type") || "").startsWith("image/")) {
-          return json({ success: true, status: "already_valid", coverUrl: currentCover });
-        }
-      } catch (error) {
-        console.warn("[BOOK COVER SYNC] Stored preview could not be checked; attempting regeneration:", book.id, error);
-      }
+    if (currentCover && await isValidStoredCover(currentCover)) {
+      return json({ success: true, status: "already_valid", coverUrl: currentCover });
+    }
+    if (!needsCoverSynchronization(currentCover)) {
+      return json({
+        success: true,
+        status: "not_missing",
+        message: "An existing cover URL is present but could not be verified; it was left unchanged."
+      });
     }
 
-    const fileId = getDriveFileId(String(book.download_url || ""));
+    const fileId = getDriveFileId(String(book.drive_file_id || "")) ||
+      getDriveFileId(String(book.drive_url || "")) ||
+      getDriveFileId(String(book.download_url || ""));
     if (!fileId) throw new CoverSyncError(422, "Google Drive file ID could not be extracted from this book's download link.");
 
     const apiKey = Deno.env.get("GOOGLE_API_KEY") || Deno.env.get("GOOGLE_DRIVE_API_KEY");
     if (!apiKey) throw new CoverSyncError(500, "Google Drive API credential is not configured.");
 
-    const metadataUrl = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`);
-    metadataUrl.searchParams.set("key", apiKey);
-    metadataUrl.searchParams.set("fields", "id,name,mimeType,thumbnailLink");
-    const metadataResponse = await fetch(metadataUrl);
-    if (!metadataResponse.ok) {
-      const message = await driveErrorMessage(metadataResponse, apiKey);
-      throw new CoverSyncError(metadataResponse.status === 404 ? 404 : metadataResponse.status === 403 ? 403 : 502, `Could not access Drive file: ${message}`);
+    const metadata = await getDriveDocument(fileId, apiKey);
+    fileName = metadata.name;
+    const classification = classifyDocument(metadata.name, metadata.mimeType);
+    if (!classification.supported) {
+      throw new CoverSyncError(415, classification.reason);
     }
 
-    const metadata = await metadataResponse.json();
-    if (!metadata.thumbnailLink) {
-      throw new CoverSyncError(422, `First-page preview is unavailable for ${metadata.name || book.title} (${metadata.mimeType || "unknown format"}).`);
-    }
-
-    const thumbnailUrl = String(metadata.thumbnailLink).replace(/=s\d+$/i, "=s1600");
-    const previewResponse = await fetch(thumbnailUrl);
-    if (!previewResponse.ok) {
-      throw new CoverSyncError(502, `Google Drive could not generate a preview for ${metadata.name || book.title}.`);
-    }
-
-    const contentType = (previewResponse.headers.get("content-type") || "").split(";")[0].toLowerCase();
-    if (!["image/jpeg", "image/png", "image/webp"].includes(contentType)) {
-      throw new CoverSyncError(422, `Google Drive returned an unsupported preview format for ${metadata.name || book.title}.`);
-    }
-    const previewBytes = new Uint8Array(await previewResponse.arrayBuffer());
+    const source = await downloadDriveDocument(metadata, apiKey, classification.extension);
+    const rendered = await renderDocument(source.bytes, source.filename, source.contentType);
+    const previewBytes = base64ToBytes(rendered.coverBase64);
     if (!previewBytes.length || previewBytes.length > maxPreviewBytes) {
-      throw new CoverSyncError(422, `Preview for ${metadata.name || book.title} is empty or exceeds the 10 MB limit.`);
+      throw new CoverSyncError(422, `Generated preview for ${metadata.name || book.title} is empty or exceeds the 10 MB limit.`);
     }
 
-    const extension = contentType === "image/png" ? "png" : contentType === "image/webp" ? "webp" : "jpg";
-    const path = `books/covers/${bookId}.${extension}`;
+    const { data: currentRecord, error: currentRecordError } = await serviceClient
+      .from("books")
+      .select("cover_url")
+      .eq("id", bookId)
+      .maybeSingle();
+    if (currentRecordError) {
+      throw new CoverSyncError(500, `Could not recheck the book cover before saving: ${currentRecordError.message}`);
+    }
+    if (!currentRecord) throw new CoverSyncError(404, "Book record was not found.");
+    const coverBeforeUpdateValue = currentRecord.cover_url;
+    const coverBeforeUpdate = String(coverBeforeUpdateValue || "");
+    if (coverBeforeUpdate && await isValidStoredCover(coverBeforeUpdate)) {
+      return json({ success: true, status: "already_valid", coverUrl: coverBeforeUpdate });
+    }
+    if (!needsCoverSynchronization(coverBeforeUpdate)) {
+      return json({
+        success: true,
+        status: "not_missing",
+        message: "The book's cover state changed during processing; the existing value was left unchanged."
+      });
+    }
+
+    const contentType = rendered.coverMimeType;
+    const path = `books/covers/${bookId}/cover-${crypto.randomUUID()}.png`;
     const { error: uploadError } = await serviceClient.storage
       .from(storageBucket)
-      .upload(path, previewBytes, { contentType, cacheControl: "31536000", upsert: true });
-    if (uploadError) throw new CoverSyncError(500, `Could not store the generated preview in the ${storageBucket} bucket: ${uploadError.message}`);
+      .upload(path, previewBytes, { contentType, cacheControl: "3600", upsert: false });
+    if (uploadError) throw new CoverSyncError(500, `Cover generated successfully but storage upload failed: ${uploadError.message}`);
 
-    const coverUrl = serviceClient.storage.from(storageBucket).getPublicUrl(path).data.publicUrl;
-    const { error: updateError } = await serviceClient
+    const coverUrl = `${serviceClient.storage.from(storageBucket).getPublicUrl(path).data.publicUrl}?v=${Date.now()}`;
+    let updateQuery = serviceClient
       .from("books")
       .update({ cover_url: coverUrl })
       .eq("id", bookId);
+    updateQuery = coverBeforeUpdateValue === null
+      ? updateQuery.is("cover_url", null)
+      : updateQuery.eq("cover_url", coverBeforeUpdateValue);
+    const { data: updatedBook, error: updateError } = await updateQuery
+      .select("id")
+      .maybeSingle();
     if (updateError) throw new CoverSyncError(500, `Could not save the preview URL: ${updateError.message}`);
+    if (!updatedBook) {
+      const { data: latestRecord, error: latestRecordError } = await serviceClient
+        .from("books")
+        .select("cover_url")
+        .eq("id", bookId)
+        .maybeSingle();
+      if (latestRecordError) throw new CoverSyncError(500, `Could not verify the saved preview: ${latestRecordError.message}`);
+      if (!latestRecord) throw new CoverSyncError(404, "Book record was not found.");
+      const latestCover = String(latestRecord.cover_url || "");
+      if (latestCover && await isValidStoredCover(latestCover)) {
+        return json({ success: true, status: "already_valid", coverUrl: latestCover });
+      }
+      return json({
+        success: true,
+        status: "not_missing",
+        message: "The book's cover state changed during processing; the existing value was left unchanged."
+      });
+    }
 
-    return json({ success: true, status: "synced", coverUrl });
+    return json({ success: true, status: "synced", coverUrl, file_name: metadata.name });
   } catch (error) {
-    const status = error instanceof CoverSyncError ? error.status : 500;
+    const status = error instanceof CoverSyncError || error instanceof DocumentRendererError ? error.status : 500;
     const message = error instanceof Error ? error.message : "Book cover synchronization failed.";
-    if (!(error instanceof CoverSyncError)) console.error("[BOOK COVER SYNC] Unexpected error:", error);
-    return json({ success: false, error: message }, status);
+    if (!(error instanceof CoverSyncError) && !(error instanceof DocumentRendererError)) {
+      console.error("[BOOK COVER SYNC] Unexpected error:", error);
+    }
+    return json({ success: false, error: message, file_name: fileName || null }, status);
   }
 });

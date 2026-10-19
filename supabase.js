@@ -24,44 +24,54 @@ try {
   console.error("Failed to initialize Supabase client:", error);
 }
 
+function getGoogleDriveFileId(value) {
+  if (!value || typeof value !== "string") return "";
+  const trimmedUrl = value.trim();
+  if (/^[A-Za-z0-9_-]{10,}$/.test(trimmedUrl)) return trimmedUrl;
+  try {
+    const url = new URL(trimmedUrl);
+    if (!["drive.google.com", "docs.google.com", "drive.usercontent.google.com"].includes(url.hostname.toLowerCase())) return "";
+    const pathMatch = url.pathname.match(/\/(?:file|document|presentation|spreadsheets)\/d\/([A-Za-z0-9_-]{10,})/i);
+    const fileId = pathMatch?.[1] || url.searchParams.get("id") || "";
+    return /^[A-Za-z0-9_-]{10,}$/.test(fileId) ? fileId : "";
+  } catch {
+    return "";
+  }
+}
+
 /**
- * Utility: Automatically converts standard Google Drive sharing links
- * into direct download links.
- * 
- * Target formats:
- * - https://drive.google.com/file/d/FILE_ID/view?usp=sharing
- * - https://drive.google.com/file/d/FILE_ID/view
- * - https://drive.google.com/open?id=FILE_ID
- * 
- * Result format:
- * - https://drive.google.com/uc?export=download&id=FILE_ID
- * 
- * @param {string} url - The original Google Drive link.
- * @returns {string} The converted direct download link, or original link if not matching.
+ * Convert supported Google Drive/Docs sharing links into direct-download URLs.
+ * Google Workspace files use their format-specific export endpoints.
  */
 function convertGoogleDriveLink(url) {
-  if (!url || typeof url !== 'string') return '';
-  
+  if (!url || typeof url !== "string") return "";
   const trimmedUrl = url.trim();
-  
-  // Pattern 1: /file/d/{FILE_ID}/view
-  const fileIdPattern = /\/file\/d\/([a-zA-Z0-9_-]+)/;
-  const match1 = trimmedUrl.match(fileIdPattern);
-  if (match1 && match1[1]) {
-    return `https://drive.google.com/uc?export=download&id=${match1[1]}`;
+  const fileId = getGoogleDriveFileId(trimmedUrl);
+  if (!fileId) return trimmedUrl;
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(trimmedUrl);
+  } catch {
+    return trimmedUrl;
   }
-  
-  // Pattern 2: ?id={FILE_ID} or &id={FILE_ID}
-  const idPattern = /[?&]id=([a-zA-Z0-9_-]+)/;
-  const match2 = trimmedUrl.match(idPattern);
-  if (match2 && match2[1]) {
-    return `https://drive.google.com/uc?export=download&id=${match2[1]}`;
+  const id = encodeURIComponent(fileId);
+  if (parsedUrl.hostname.toLowerCase() === "docs.google.com") {
+    if (/\/document\/d\//i.test(parsedUrl.pathname)) {
+      return `https://docs.google.com/document/d/${id}/export?format=docx`;
+    }
+    if (/\/presentation\/d\//i.test(parsedUrl.pathname)) {
+      return `https://docs.google.com/presentation/d/${id}/export/pptx`;
+    }
+    if (/\/spreadsheets\/d\//i.test(parsedUrl.pathname)) {
+      return `https://docs.google.com/spreadsheets/d/${id}/export?format=xlsx`;
+    }
   }
-  
-  return trimmedUrl;
+  return `https://drive.google.com/uc?export=download&id=${id}`;
 }
 
 // Export utilities to the global scope
+window.getGoogleDriveFileId = getGoogleDriveFileId;
 window.convertGoogleDriveLink = convertGoogleDriveLink;
 // ==========================================
 // ANTI-INSPECTION & TAMPERING DETERRENTS
