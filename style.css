@@ -163,6 +163,116 @@ main {
 .text-center { text-align: center; }
 .hidden { display: none !important; }
 
+.book-service-dialog {
+  width: min(100% - 2rem, 620px);
+  max-width: 620px;
+  max-height: calc(100dvh - 2rem);
+  margin: auto;
+  padding: 0;
+  overflow-y: auto;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius-lg);
+  box-shadow: var(--shadow-xl);
+}
+
+.book-service-dialog[open] {
+  animation: book-service-dialog-enter 180ms ease-out;
+}
+
+.book-service-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.book-service-dialog-content {
+  padding: clamp(1.25rem, 5vw, 2.5rem);
+  text-align: center;
+}
+
+.book-service-dialog-icon {
+  margin-bottom: 0.25rem;
+  font-size: 2rem;
+  line-height: 1.3;
+}
+
+.book-service-dialog-label {
+  margin-bottom: 0.5rem;
+  color: var(--color-primary);
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.book-service-dialog h2 {
+  margin-bottom: 1rem;
+  font-size: clamp(1.15rem, 4vw, 1.55rem);
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.book-service-dialog-content > p:not(.book-service-dialog-label) {
+  margin-bottom: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.book-service-countdown {
+  margin: 1.25rem 0;
+  padding: 0.85rem 1rem;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius-md);
+}
+
+.book-service-countdown-label {
+  display: block;
+  margin-bottom: 0.2rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+#book-service-countdown {
+  margin: 0;
+  color: var(--color-primary);
+  font-size: clamp(0.9rem, 3.8vw, 1.15rem);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+}
+
+.book-service-dialog-contact {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+@media (max-width: 560px) {
+  .book-service-dialog {
+    max-height: calc(100dvh - 1rem);
+    border-radius: var(--border-radius-md);
+  }
+
+  .book-service-dialog-contact {
+    flex-direction: column;
+  }
+
+  .book-service-dialog-contact .btn {
+    width: 100%;
+  }
+}
+
+@keyframes book-service-dialog-enter {
+  from { opacity: 0; transform: translateY(0.5rem) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 /* ==========================================================================
    HEADER / NAVIGATION
    ========================================================================== */

@@ -7,6 +7,7 @@ document.addEventListener("DOMContentLoaded", () => {
   injectGlobalUI();
 
   // 2. Initialize Core Systems
+  initBookServiceAnnouncement();
   initTheme();
   initMobileMenu();
   initHiddenAdminShortcut();
@@ -14,6 +15,47 @@ document.addEventListener("DOMContentLoaded", () => {
   initFloatingAds();
   initRealtimeSubscriptions();
 });
+
+function initBookServiceAnnouncement() {
+  const modal = document.getElementById("book-service-announcement");
+  const countdown = document.getElementById("book-service-countdown");
+  if (!modal || !countdown || modal.dataset.countdownInitialized === "true") return;
+
+  // 00:00 on 7 November in Malawi (UTC+02:00) is 22:00 UTC on 6 November.
+  const deadline = Date.UTC(2026, 10, 6, 22, 0, 0);
+  if (Date.now() >= deadline) {
+    modal.remove();
+    return;
+  }
+
+  modal.dataset.countdownInitialized = "true";
+  modal.addEventListener("cancel", (event) => event.preventDefault());
+  modal.showModal();
+
+  let countdownTimer = null;
+  const updateCountdown = () => {
+    const now = Date.now();
+    const remaining = deadline - now;
+    if (remaining <= 0) {
+      if (countdownTimer !== null) clearTimeout(countdownTimer);
+      if (modal.open) modal.close();
+      modal.remove();
+      return;
+    }
+
+    const totalSeconds = Math.floor(remaining / 1000);
+    const days = Math.floor(totalSeconds / 86400);
+    const hours = Math.floor((totalSeconds % 86400) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const pad = (value) => String(value).padStart(2, "0");
+    countdown.textContent = `${pad(days)} Days : ${pad(hours)} Hours : ${pad(minutes)} Minutes : ${pad(seconds)} Seconds`;
+
+    countdownTimer = setTimeout(updateCountdown, Math.min(1000 - (now % 1000), remaining));
+  };
+
+  updateCountdown();
+}
 
 /**
  * Real-time Database Subscriptions
