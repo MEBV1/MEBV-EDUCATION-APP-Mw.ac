@@ -1,7 +1,8 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import {
   classifyDocument,
-  getDriveDocument
+  getDriveDocument,
+  hasZipSignature
 } from "../_shared/drive-documents.ts";
 
 const allowedOrigins = new Set([
@@ -301,10 +302,11 @@ Deno.serve(async (request) => {
       throw new DownloadError(status, `Google Drive file is inaccessible: ${message}`);
     }
 
-    const contentType = driveResponse.headers.get("content-type") || metadata.mimeType;
-    if (/^(?:text\/html|application\/json)/i.test(contentType)) {
+    const upstreamContentType = driveResponse.headers.get("content-type") || metadata.mimeType;
+    if (/^(?:text\/html|application\/json)/i.test(upstreamContentType)) {
       throw new DownloadError(502, `Google Drive returned an access page instead of ${metadata.name}.`);
     }
+    const contentType = classification.extension === "zip" ? "application/zip" : upstreamContentType;
     const contentLength = Number(driveResponse.headers.get("content-length") || 0);
     if (contentLength > maxDownloadBytes) {
       throw new DownloadError(413, "This file exceeds the 250 MB download limit.");
@@ -316,13 +318,40 @@ Deno.serve(async (request) => {
     const exportDetails = googleWorkspaceDownloadMime[classification.extension];
     const extension = exportDetails?.extension || classification.extension;
     const rawName = metadata.name.replace(/\.[^.]+$/, "");
-    const filename = safeFilename(`${rawName}.${extension}`);
+    let filename = safeFilename(
+      classification.extension === "zip"
+        ? (/\.zip$/i.test(metadata.name) ? metadata.name : `${metadata.name || "book-download"}.zip`)
+        : `${rawName}.${extension}`
+    );
+    if (classification.extension === "zip" && !/\.zip$/i.test(filename)) {
+      const baseName = filename.replace(/\.[^.]*$/, "").slice(0, 175) || "book-download";
+      filename = `${baseName}.zip`;
+    }
     const reader = driveResponse.body.getReader();
     const downloadServiceClient = serviceClient;
     if (!downloadServiceClient) {
       throw new DownloadError(503, "Server-side book download tracking is not configured.");
     }
     let streamedBytes = 0;
+    const prefetchedChunks: Uint8Array[] = [];
+    if (classification.extension === "zip") {
+      let signatureBytes = new Uint8Array(0);
+      while (signatureBytes.length < 64 * 1024 && !hasZipSignature(signatureBytes)) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        prefetchedChunks.push(chunk.value);
+        const available = chunk.value.subarray(0, 64 * 1024 - signatureBytes.length);
+        const nextSignatureBytes = new Uint8Array(signatureBytes.length + available.length);
+        nextSignatureBytes.set(signatureBytes);
+        nextSignatureBytes.set(available, signatureBytes.length);
+        signatureBytes = nextSignatureBytes;
+      }
+      if (!hasZipSignature(signatureBytes)) {
+        await reader.cancel();
+        throw new DownloadError(415, "The downloaded file content is not a valid ZIP archive.");
+      }
+    }
+    let prefetchedChunkIndex = 0;
     let reservationClosed = false;
     const releaseReservation = async () => {
       if (reservationClosed) return;
@@ -338,7 +367,10 @@ Deno.serve(async (request) => {
     const stream = new ReadableStream<Uint8Array>({
       async pull(controller) {
         try {
-          const { done, value } = await reader.read();
+          const next = prefetchedChunkIndex < prefetchedChunks.length
+            ? { done: false, value: prefetchedChunks[prefetchedChunkIndex++] }
+            : await reader.read();
+          const { done, value } = next;
           if (done) {
             const { data: marked, error } = await downloadServiceClient.rpc(
               "mark_book_download_streamed",

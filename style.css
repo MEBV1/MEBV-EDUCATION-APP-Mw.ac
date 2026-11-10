@@ -163,116 +163,6 @@ main {
 .text-center { text-align: center; }
 .hidden { display: none !important; }
 
-.book-service-dialog {
-  width: min(100% - 2rem, 620px);
-  max-width: 620px;
-  max-height: calc(100dvh - 2rem);
-  margin: auto;
-  padding: 0;
-  overflow-y: auto;
-  color: var(--text-primary);
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
-  border-radius: var(--border-radius-lg);
-  box-shadow: var(--shadow-xl);
-}
-
-.book-service-dialog[open] {
-  animation: book-service-dialog-enter 180ms ease-out;
-}
-
-.book-service-dialog::backdrop {
-  background: rgba(15, 23, 42, 0.72);
-  backdrop-filter: blur(4px);
-}
-
-.book-service-dialog-content {
-  padding: clamp(1.25rem, 5vw, 2.5rem);
-  text-align: center;
-}
-
-.book-service-dialog-icon {
-  margin-bottom: 0.25rem;
-  font-size: 2rem;
-  line-height: 1.3;
-}
-
-.book-service-dialog-label {
-  margin-bottom: 0.5rem;
-  color: var(--color-primary);
-  font-size: 0.8rem;
-  font-weight: 800;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
-.book-service-dialog h2 {
-  margin-bottom: 1rem;
-  font-size: clamp(1.15rem, 4vw, 1.55rem);
-  font-weight: 800;
-  line-height: 1.35;
-}
-
-.book-service-dialog-content > p:not(.book-service-dialog-label) {
-  margin-bottom: 0.75rem;
-  color: var(--text-secondary);
-}
-
-.book-service-countdown {
-  margin: 1.25rem 0;
-  padding: 0.85rem 1rem;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-color);
-  border-radius: var(--border-radius-md);
-}
-
-.book-service-countdown-label {
-  display: block;
-  margin-bottom: 0.2rem;
-  color: var(--text-muted);
-  font-size: 0.78rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-#book-service-countdown {
-  margin: 0;
-  color: var(--color-primary);
-  font-size: clamp(0.9rem, 3.8vw, 1.15rem);
-  font-weight: 800;
-  font-variant-numeric: tabular-nums;
-  line-height: 1.6;
-}
-
-.book-service-dialog-contact {
-  display: flex;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin-top: 1rem;
-}
-
-@media (max-width: 560px) {
-  .book-service-dialog {
-    max-height: calc(100dvh - 1rem);
-    border-radius: var(--border-radius-md);
-  }
-
-  .book-service-dialog-contact {
-    flex-direction: column;
-  }
-
-  .book-service-dialog-contact .btn {
-    width: 100%;
-  }
-}
-
-@keyframes book-service-dialog-enter {
-  from { opacity: 0; transform: translateY(0.5rem) scale(0.98); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
-
 /* ==========================================================================
    HEADER / NAVIGATION
    ========================================================================== */
@@ -509,99 +399,23 @@ main {
   width: 100%;
 }
 
-/* ==========================================================================
-   GLOBAL SPLASH SYSTEM (LOADING & DIALOGS)
+/* ===========================================================================
+   NON-BLOCKING OPERATION STATUS
    ========================================================================== */
-.splash-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100vw;
-  height: 100vh;
-  background-color: rgba(15, 23, 42, 0.9);
-  z-index: var(--z-splash);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  opacity: 0;
-  visibility: hidden;
-  transition: opacity var(--transition-normal), visibility var(--transition-normal);
-  backdrop-filter: blur(8px);
+.operation-status {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto 1rem;
+  padding: 0.4rem 0.75rem;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius-sm);
+  font-size: 0.875rem;
 }
 
-.splash-overlay.active {
-  opacity: 1;
-  visibility: visible;
-}
-
-.splash-container {
-  text-align: center;
-  color: #ffffff;
-  max-width: 400px;
-  padding: 2rem;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-
-.splash-logo {
-  width: 100px;
-  height: 100px;
-  object-fit: contain;
-  border-radius: 50%;
-  margin-bottom: 1.5rem;
-  box-shadow: 0 0 20px rgba(56, 189, 248, 0.4);
-}
-
-/* Pulse animation for Logo when loaded without explicit spinner */
-.splash-logo.pulsing {
-  animation: logoPulse 1.8s infinite ease-in-out;
-}
-
-.splash-spinner {
-  width: 50px;
-  height: 50px;
-  border: 4px solid rgba(255, 255, 255, 0.1);
-  border-left-color: var(--color-primary);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  margin-bottom: 1.5rem;
-}
-
-.splash-message {
-  font-size: 1.25rem;
-  font-weight: 600;
-  margin-bottom: 0.75rem;
-  letter-spacing: -0.01em;
-}
-
-/* Progress bar inside Splash Loading */
-.splash-progress-container {
-  width: 100%;
-  background-color: rgba(255, 255, 255, 0.1);
-  height: 6px;
-  border-radius: 3px;
-  margin-top: 1rem;
-  overflow: hidden;
-}
-
-.splash-progress-bar {
-  width: 0%;
-  height: 100%;
-  background-color: var(--color-primary);
-  transition: width 0.3s ease;
-}
-
-@keyframes spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
-}
-
-@keyframes logoPulse {
-  0% { transform: scale(1); filter: brightness(1); }
-  50% { transform: scale(1.08); filter: brightness(1.2); }
-  100% { transform: scale(1); filter: brightness(1); }
+.operation-status[hidden] {
+  display: none;
 }
 
 /* ==========================================================================
@@ -1131,139 +945,6 @@ textarea.form-control {
 .quiz-option.selected {
   border-color: var(--color-primary);
   background-color: rgba(2, 132, 199, 0.08);
-}
-
-/* ==========================================================================
-   PREMIUM ADVERTISEMENT SYSTEM
-   ========================================================================== */
-.floating-ad-container {
-  position: fixed;
-  top: 20px;
-  right: 20px;
-  width: 340px;
-  background: rgba(var(--bg-secondary-rgb, 255, 255, 255), 0.7);
-  backdrop-filter: blur(16px) saturate(180%);
-  -webkit-backdrop-filter: blur(16px) saturate(180%);
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  border-radius: 20px;
-  box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.15);
-  z-index: 9999;
-  overflow: hidden;
-  transition: all 0.5s cubic-bezier(0.19, 1, 0.22, 1);
-  animation: adSlideInRight 0.8s cubic-bezier(0.19, 1, 0.22, 1) forwards, adPulseGlow 6s infinite ease-in-out;
-}
-
-@keyframes adSlideInRight {
-  from { opacity: 0; transform: translateX(100px) scale(0.9); }
-  to { opacity: 1; transform: translateX(0) scale(1); }
-}
-
-@keyframes adPulseGlow {
-  0%, 100% { box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.15); }
-  50% { box-shadow: 0 12px 40px 0 rgba(var(--color-primary-rgb, 2, 132, 199), 0.3); }
-}
-
-@media (max-width: 1120px) {
-  .floating-ad-container {
-    top: 10px;
-    right: 10px;
-    left: 10px;
-    width: auto;
-    max-width: none;
-    animation: adFadeInDown 0.8s ease-out forwards;
-  }
-}
-
-@keyframes adFadeInDown {
-  from { opacity: 0; transform: translateY(-20px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-.floating-ad-container.minimized {
-  height: 52px;
-  width: 240px;
-  transform: translateY(0);
-}
-
-.ad-controls {
-  position: absolute;
-  top: 0.75rem;
-  right: 0.75rem;
-  display: flex;
-  gap: 0.4rem;
-  z-index: 20;
-}
-
-.ad-nav-controls {
-  position: absolute;
-  bottom: 0.75rem;
-  right: 1.25rem;
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-}
-
-.ad-btn {
-  background: rgba(var(--bg-primary-rgb, 15, 23, 42), 0.15);
-  color: var(--text-primary);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 8px;
-  width: 28px;
-  height: 28px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  transition: all 0.2s ease;
-  backdrop-filter: blur(4px);
-}
-
-.ad-btn:hover {
-  background: rgba(var(--color-primary-rgb, 2, 132, 199), 0.2);
-  transform: translateY(-1px);
-}
-
-.ad-new-badge {
-  position: absolute;
-  top: 1rem;
-  left: 1rem;
-  background: var(--color-gold, #eab308);
-  color: #000;
-  padding: 0.25rem 0.6rem;
-  border-radius: 20px;
-  font-size: 0.65rem;
-  font-weight: 800;
-  text-transform: uppercase;
-  z-index: 10;
-  box-shadow: 0 2px 8px rgba(234, 179, 8, 0.4);
-}
-
-.ad-content-fade {
-  animation: adFadeTransition 0.5s ease-in-out;
-}
-
-@keyframes adFadeTransition {
-  from { opacity: 0; transform: scale(0.98); }
-  to { opacity: 1; transform: scale(1); }
-}
-
-.ad-learn-more-btn {
-  display: inline-block;
-  padding: 0.6rem 1.2rem;
-  background: linear-gradient(135deg, var(--color-primary), var(--color-primary-dark, #075985));
-  color: white !important;
-  border-radius: 12px;
-  font-size: 0.85rem;
-  font-weight: 600;
-  text-decoration: none;
-  transition: all 0.3s ease;
-  box-shadow: 0 4px 12px rgba(2, 132, 199, 0.2);
-}
-
-.ad-learn-more-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(2, 132, 199, 0.3);
 }
 
 .ad-banner-section {
@@ -1918,44 +1599,6 @@ textarea.form-control {
     grid-template-columns: 1fr !important;
   }
 }
-/* --- Smart Refresh System Styles --- */
-.refresh-modal-overlay {
-    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-    background: rgba(15, 23, 42, 0.4);
-    backdrop-filter: blur(8px);
-    z-index: 10000;
-    display: none; align-items: center; justify-content: center;
-    animation: fadeInRefresh 0.4s ease forwards;
-    overscroll-behavior: contain;
-}
-
-.refresh-modal-overlay.active { display: flex; }
-
-.refresh-modal-box {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    padding: 2rem;
-    border-radius: var(--border-radius-lg);
-    max-width: 450px; width: 90%;
-    text-align: center;
-    box-shadow: var(--shadow-xl);
-    transform: translateY(20px);
-    animation: slideUpRefresh 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
-}
-
-.refresh-modal-title { font-size: 1.5rem; font-weight: 800; margin-bottom: 1rem; color: var(--text-primary); }
-.refresh-modal-message { font-size: 1rem; color: var(--text-secondary); margin-bottom: 2rem; line-height: 1.6; }
-.refresh-modal-actions { display: flex; justify-content: center; }
-.refresh-modal-actions .btn { min-width: 160px; }
-
-@keyframes fadeInRefresh { from { opacity: 0; } to { opacity: 1; } }
-@keyframes slideUpRefresh { to { transform: translateY(0); } }
-
-@media (max-width: 480px) {
-    .refresh-modal-box { padding: 1.5rem; }
-    .refresh-modal-actions .btn { width: 100%; }
-}
-
 /* PWA installation and push notification controls */
 [hidden] {
   display: none !important;

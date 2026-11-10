@@ -3,36 +3,55 @@
 
 let vacancyItems = [];
 let currentVacancy = null;
+const vacancyPageSize = 50;
+let vacancyPage = 0;
+let vacancyLoadVersion = 0;
+let vacancyHasMore = false;
+let vacancySavePending = false;
+const pendingVacancyQueries = new Map();
 
-window.addEventListener("DOMContentLoaded", () => {
+window.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("vacancy-search")?.addEventListener("input", debounce(loadVacancies, 300));
   document.getElementById("vacancy-category")?.addEventListener("change", loadVacancies);
   document.getElementById("vacancy-location")?.addEventListener("change", loadVacancies);
-  loadVacancies();
-  handleInitialQuery();
+  document.getElementById("load-more-vacancies")?.addEventListener("click", () => loadVacancies(true));
+  await loadVacancies();
+  await handleInitialQuery();
 });
 
-async function loadVacancies() {
-  window.showLoading("Loading vacancies...");
+async function loadVacancies(append = false) {
+  const loadVersion = ++vacancyLoadVersion;
+  if (!append) vacancyPage = 0;
   try {
     const searchTerm = document.getElementById("vacancy-search")?.value || "";
     const category = document.getElementById("vacancy-category")?.value || "all";
     const location = document.getElementById("vacancy-location")?.value || "all";
-    vacancyItems = await fetchVacancies(searchTerm, category, location);
+    const vacancies = await fetchVacancies(searchTerm, category, location, vacancyPage);
+    if (loadVersion !== vacancyLoadVersion) return;
+    vacancyItems = append ? vacancyItems.concat(vacancies) : vacancies;
+    vacancyHasMore = vacancies.length === vacancyPageSize;
+    if (append) vacancyPage += 1;
     renderVacancyCards(vacancyItems);
   } finally {
-    window.hideLoading();
+    if (loadVersion === vacancyLoadVersion) {
+      const loadMoreButton = document.getElementById("load-more-vacancies");
+      if (loadMoreButton) loadMoreButton.hidden = !vacancyHasMore;
+    }
   }
 }
 
-async function fetchVacancies(searchTerm = "", category = "all", location = "all") {
+async function fetchVacancies(searchTerm = "", category = "all", location = "all", page = 0) {
   if (!window.supabaseClient) return [];
+  const requestKey = JSON.stringify([searchTerm.trim(), category, location, page]);
+  if (pendingVacancyQueries.has(requestKey)) return pendingVacancyQueries.get(requestKey);
 
-  try {
+  const request = (async () => {
+    try {
     let query = window.supabaseClient
       .from("vacancies")
-      .select("*")
-      .order("created_at", { ascending: false });
+      .select("id,title,company,location,description,employment_type,deadline,views_count,salary,category,apply_link,created_at")
+      .order("created_at", { ascending: false })
+      .range(page * vacancyPageSize, (page + 1) * vacancyPageSize - 1);
 
     if (category && category !== "all") {
       query = query.eq("category", category);
@@ -51,6 +70,13 @@ async function fetchVacancies(searchTerm = "", category = "all", location = "all
   } catch (error) {
     console.error("Failed to fetch vacancies:", error);
     return [];
+  }
+  })();
+  pendingVacancyQueries.set(requestKey, request);
+  try {
+    return await request;
+  } finally {
+    pendingVacancyQueries.delete(requestKey);
   }
 }
 
@@ -120,12 +146,15 @@ function closeVacancyModal() {
 }
 
 async function saveCurrentVacancy() {
-  if (!currentVacancy) return;
+  if (!currentVacancy || vacancySavePending) return;
   if (!window.supabaseClient) {
     window.showError("Service is unavailable right now.");
     return;
   }
 
+  vacancySavePending = true;
+  const saveButton = document.getElementById("vacancy-save-btn");
+  if (saveButton) saveButton.disabled = true;
   window.showLoading("Saving vacancy...");
   try {
     const { data: { session } } = await window.supabaseClient.auth.getSession();
@@ -144,6 +173,8 @@ async function saveCurrentVacancy() {
     console.error("Failed to save vacancy:", error);
     window.showError("Could not save the vacancy. Please try again.");
   } finally {
+    vacancySavePending = false;
+    if (saveButton) saveButton.disabled = false;
     window.hideLoading();
   }
 }
@@ -160,20 +191,20 @@ async function trackVacancyView(vacancyId) {
   });
 }
 
-function handleInitialQuery() {
+async function handleInitialQuery() {
   const params = new URLSearchParams(window.location.search);
   const vacancyId = params.get("id");
-  if (vacancyId) {
-    const check = setInterval(() => {
-      if (vacancyItems.length > 0) {
-        const vacancy = vacancyItems.find((item) => item.id === vacancyId);
-        if (vacancy) {
-          openVacancyDetails(vacancyId);
-          clearInterval(check);
-        }
-      }
-    }, 200);
-    setTimeout(() => clearInterval(check), 3000);
+  if (!vacancyId) return;
+  if (vacancyItems.some((item) => item.id === vacancyId)) return openVacancyDetails(vacancyId);
+
+  const { data, error } = await window.supabaseClient
+    .from("vacancies")
+    .select("id,title,company,location,description,employment_type,deadline,views_count,salary,category,apply_link,created_at")
+    .eq("id", vacancyId)
+    .maybeSingle();
+  if (!error && data) {
+    vacancyItems.push(data);
+    openVacancyDetails(vacancyId);
   }
 }
 

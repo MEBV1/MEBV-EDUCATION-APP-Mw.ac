@@ -3,59 +3,14 @@
 // Implements Global Splash, Toast, Theme Toggle, Responsive Navigation, and Session updates
 
 document.addEventListener("DOMContentLoaded", () => {
-  // 1. Inject Global Splash Screen, Toasts, and hidden admin modal HTML dynamically.
+  // 1. Inject lightweight status feedback, toasts, and the protected admin login UI.
   injectGlobalUI();
 
   // 2. Initialize Core Systems
-  initBookServiceAnnouncement();
   initTheme();
   initMobileMenu();
   initHiddenAdminShortcut();
-  syncGlobalSessionUI();
-  initFloatingAds();
-  initRealtimeSubscriptions();
 });
-
-function initBookServiceAnnouncement() {
-  const modal = document.getElementById("book-service-announcement");
-  const countdown = document.getElementById("book-service-countdown");
-  if (!modal || !countdown || modal.dataset.countdownInitialized === "true") return;
-
-  // 00:00 on 7 November in Malawi (UTC+02:00) is 22:00 UTC on 6 November.
-  const deadline = Date.UTC(2026, 10, 6, 22, 0, 0);
-  if (Date.now() >= deadline) {
-    modal.remove();
-    return;
-  }
-
-  modal.dataset.countdownInitialized = "true";
-  modal.addEventListener("cancel", (event) => event.preventDefault());
-  modal.showModal();
-
-  let countdownTimer = null;
-  const updateCountdown = () => {
-    const now = Date.now();
-    const remaining = deadline - now;
-    if (remaining <= 0) {
-      if (countdownTimer !== null) clearTimeout(countdownTimer);
-      if (modal.open) modal.close();
-      modal.remove();
-      return;
-    }
-
-    const totalSeconds = Math.floor(remaining / 1000);
-    const days = Math.floor(totalSeconds / 86400);
-    const hours = Math.floor((totalSeconds % 86400) / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-    const pad = (value) => String(value).padStart(2, "0");
-    countdown.textContent = `${pad(days)} Days : ${pad(hours)} Hours : ${pad(minutes)} Minutes : ${pad(seconds)} Seconds`;
-
-    countdownTimer = setTimeout(updateCountdown, Math.min(1000 - (now % 1000), remaining));
-  };
-
-  updateCountdown();
-}
 
 /**
  * Real-time Database Subscriptions
@@ -79,7 +34,7 @@ function initRealtimeSubscriptions() {
     .channel('public-content-updates')
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'advertisements' }, (payload) => {
       console.log('New advertisement published:', payload.new);
-      if (typeof window.initFloatingAds === 'function') window.initFloatingAds();
+      if (typeof window.initAdvertisements === 'function') window.initAdvertisements(true);
     })
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'blog_posts' }, (payload) => {
       console.log('New blog post published:', payload.new);
@@ -89,14 +44,16 @@ function initRealtimeSubscriptions() {
       console.log('New service published:', payload.new);
       if (typeof window.loadServices === 'function') window.loadServices();
     })
-    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'books' }, (payload) => {
-      if (payload.new.featured !== payload.old.featured || payload.new.cover_url !== payload.old.cover_url) {
-        console.log('Book listing or cover changed:', payload.new.id);
-        if (typeof window.loadFeaturedBooks === 'function') window.loadFeaturedBooks();
-        if (typeof window.loadBooks === 'function') window.loadBooks();
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'books' }, (payload) => {
+      if (typeof window.applyBookRealtimeChange !== 'function') return;
+      const changed = window.applyBookRealtimeChange(payload.eventType, payload.new, payload.old);
+      if (changed && (payload.new?.featured || payload.old?.featured) && typeof window.loadFeaturedBooks === 'function') {
+        window.loadFeaturedBooks();
       }
     })
     .subscribe((status) => {
+      window.bookRealtimeConnected = status === 'SUBSCRIBED';
+      window.dispatchEvent(new CustomEvent("mebv:book-realtime-status"));
       if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
         publicContentUpdatesChannel = null;
       }
@@ -104,26 +61,20 @@ function initRealtimeSubscriptions() {
 }
 
 /**
- * Injects required system overlays for loading, toasts, hidden admin modal, and alerts.
+ * Injects shared inline status feedback, toasts, and the protected admin modal.
  * This guarantees uniform behavior across every HTML template.
  */
 function injectGlobalUI() {
-  // Splash Overlay DOM
-  if (!document.getElementById("global-splash-overlay")) {
-    const splash = document.createElement("div");
-    splash.id = "global-splash-overlay";
-    splash.className = "splash-overlay";
-    splash.innerHTML = `
-      <div class="splash-container">
-        <img src="LOGO.png" alt="Malawi Education" id="global-splash-logo" class="splash-logo pulsing">
-        <div id="global-splash-spinner" class="splash-spinner"></div>
-        <div id="global-splash-message" class="splash-message">Loading...</div>
-        <div class="splash-progress-container" id="global-splash-progress-wrap">
-          <div class="splash-progress-bar" id="global-splash-progress-bar"></div>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(splash);
+  if (!document.getElementById("global-operation-status")) {
+    const status = document.createElement("div");
+    status.id = "global-operation-status";
+    status.className = "operation-status";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    status.hidden = true;
+    const main = document.querySelector("main");
+    if (main) main.prepend(status);
+    else document.body.prepend(status);
   }
 
   // Toast Notifications Container DOM
@@ -176,30 +127,22 @@ function injectGlobalUI() {
 }
 
 /**
- * Global Splash: Show screen
+ * Show non-blocking inline operation feedback.
  * @param {string} message - Message to display
  */
 window.showLoading = function(message = "Processing request...") {
-  const overlay = document.getElementById("global-splash-overlay");
-  const msgEl = document.getElementById("global-splash-message");
-  const progressWrap = document.getElementById("global-splash-progress-wrap");
-  const progressFill = document.getElementById("global-splash-progress-bar");
-  
-  if (overlay && msgEl) {
-    msgEl.textContent = message;
-    progressWrap.style.display = "none"; // Hide progress unless custom value is supplied later
-    progressFill.style.width = "0%";
-    overlay.classList.add("active");
+  const status = document.getElementById("global-operation-status");
+  if (status) {
+    status.textContent = message;
+    status.hidden = false;
   }
 };
 
-/**
- * Global Splash: Hide screen
- */
 window.hideLoading = function() {
-  const overlay = document.getElementById("global-splash-overlay");
-  if (overlay) {
-    overlay.classList.remove("active");
+  const status = document.getElementById("global-operation-status");
+  if (status) {
+    status.hidden = true;
+    status.textContent = "";
   }
 };
 
@@ -726,12 +669,22 @@ async function syncGlobalSessionUI() {
 /**
  * Initialize Floating Advertisements with rotation and premium UI
  */
-let adRotationInterval = null;
-let adRestoreTimeout = null;
-let currentAdIndex = 0;
 let activeAds = [];
+let adLoadPromise = null;
+let adsLoaded = false;
+const viewedAdIds = new Set();
 
-window.initFloatingAds = async function() {
+window.initAdvertisements = function(refresh = false) {
+  if (adLoadPromise) return adLoadPromise;
+  if (adsLoaded && !refresh) return Promise.resolve();
+
+  adLoadPromise = loadAdvertisements().finally(() => {
+    adLoadPromise = null;
+  });
+  return adLoadPromise;
+};
+
+async function loadAdvertisements() {
   console.log("[ADS] Loading advertisements");
   if (!window.supabaseClient) {
     console.error("[ADS] Supabase client not found");
@@ -741,7 +694,7 @@ window.initFloatingAds = async function() {
   try {
     const { data: ads, error } = await window.supabaseClient
       .from("advertisements")
-      .select("*")
+      .select("id,title,description,link_url,image_url,created_at,impressions_count,clicks_count,status")
       .eq("status", "active")
       .order("created_at", { ascending: false });
 
@@ -750,43 +703,13 @@ window.initFloatingAds = async function() {
       return;
     }
 
-    if (!ads || ads.length === 0) {
-      console.warn("[ADS] No active advertisements found in public.advertisements");
+    activeAds = ads || [];
+    adsLoaded = true;
+    if (activeAds.length === 0) {
+      renderBannerAds();
       return;
     }
-
-    // Cache advertisements in memory
-    activeAds = ads;
     console.log(`[ADS] Advertisements found: ${activeAds.length}`);
-    
-    // Clear existing ad if any
-    const existingAd = document.querySelector(".floating-ad-container");
-    if (existingAd) existingAd.remove();
-
-    // Check if ad is currently hidden via sessionStorage
-    const hiddenUntil = sessionStorage.getItem('ad_hidden_until');
-    const now = Date.now();
-
-    if (hiddenUntil && now < parseInt(hiddenUntil)) {
-      const remaining = parseInt(hiddenUntil) - now;
-      console.log(`[ADS] Advertisement currently hidden. Restoring in ${Math.round(remaining/1000)}s`);
-      
-      if (adRestoreTimeout) clearTimeout(adRestoreTimeout);
-      adRestoreTimeout = setTimeout(() => {
-        console.log("[ADS] Advertisement restored");
-        console.log("[ADS] Rotation resumed");
-        renderAd(activeAds[currentAdIndex]);
-        startAdRotation();
-        sessionStorage.removeItem('ad_hidden');
-        sessionStorage.removeItem('ad_hidden_until');
-      }, remaining);
-      
-      renderBannerAds(); // Banners are not affected by the 60s timer
-      return;
-    }
-
-    renderAd(activeAds[currentAdIndex]);
-    startAdRotation();
     renderBannerAds();
 
   } catch (err) {
@@ -794,127 +717,15 @@ window.initFloatingAds = async function() {
   }
 };
 
-function renderAd(ad) {
-  if (!ad) return;
-
-  // Don't render if hidden period hasn't expired
-  const hiddenUntil = sessionStorage.getItem('ad_hidden_until');
-  if (hiddenUntil && Date.now() < parseInt(hiddenUntil)) return;
-
-  console.log(`[ADS] Rendering advertisement: ${ad.title}`);
-
-  let adEl = document.querySelector(".floating-ad-container");
-  if (!adEl) {
-    adEl = document.createElement("div");
-    adEl.className = "floating-ad-container";
-    document.body.appendChild(adEl);
-  }
-
-  // Check if ad is "NEW" (within last 48 hours)
-  const isNew = (new Date() - new Date(ad.created_at)) < (48 * 60 * 60 * 1000);
-
-  adEl.innerHTML = `
-    <div class="ad-controls">
-      <button class="ad-btn" onclick="toggleAdMinimize(this)" title="Minimize">_</button>
-      <button class="ad-btn" onclick="dismissAd('${ad.id}')" title="Close">&times;</button>
-    </div>
-    <div class="ad-content-wrapper ad-content-fade">
-      ${isNew ? '<div class="ad-new-badge">New</div>' : ''}
-      <a href="${ad.link_url || '#'}" target="_blank" onclick="trackAdClick('${ad.id}')" style="text-decoration: none; color: inherit; display: block;">
-        ${ad.image_url ? `<img src="${ad.image_url}" style="width: 100%; height: 180px; object-fit: cover; border-bottom: 1px solid rgba(255,255,255,0.1);">` : ''}
-        <div style="padding: 1.5rem;">
-          <div style="font-size: 0.65rem; font-weight: 800; text-transform: uppercase; color: var(--color-primary); margin-bottom: 0.6rem; letter-spacing: 0.1em;">Featured Announcement</div>
-          <h4 style="margin: 0 0 0.5rem 0; font-size: 1.25rem; font-weight: 800; line-height: 1.2; color: var(--text-primary);">${ad.title}</h4>
-          <p style="margin: 0 0 1.25rem 0; font-size: 0.9rem; color: var(--text-secondary); line-height: 1.6; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">${ad.description || ''}</p>
-          
-          <div style="display: flex; align-items: center; justify-content: space-between; gap: 1rem;">
-            <div class="ad-learn-more-btn">Learn More &rarr;</div>
-            <span style="font-size: 0.7rem; color: var(--text-muted); font-weight: 500;">
-              <span id="ad-impressions-${ad.id}">${ad.impressions_count || 0}</span> views
-            </span>
-          </div>
-        </div>
-      </a>
-      
-      ${activeAds.length > 1 ? `
-        <div class="ad-nav-controls">
-          <button class="ad-btn" onclick="prevAd(event)" title="Previous Ad" style="width: 24px; height: 24px; font-size: 10px;">&lt;</button>
-          <span style="font-size: 0.65rem; color: var(--text-muted); font-weight: 700; min-width: 30px; text-align: center;">${currentAdIndex + 1} / ${activeAds.length}</span>
-          <button class="ad-btn" onclick="nextAd(event)" title="Next Ad" style="width: 24px; height: 24px; font-size: 10px;">&gt;</button>
-        </div>
-      ` : ''}
-    </div>
-  `;
-
-  trackAdImpression(ad.id);
-}
-
-function startAdRotation() {
-  if (adRotationInterval) clearInterval(adRotationInterval);
-  if (activeAds.length <= 1) return;
-
-  adRotationInterval = setInterval(() => {
-    nextAd();
-  }, 30000); // Rotate every 30 seconds
-}
-
-window.nextAd = function(e) {
-  if (e) e.preventDefault();
-  currentAdIndex = (currentAdIndex + 1) % activeAds.length;
-  renderAd(activeAds[currentAdIndex]);
-  // Reset timer on manual navigation
-  startAdRotation();
-};
-
-window.prevAd = function(e) {
-  if (e) e.preventDefault();
-  currentAdIndex = (currentAdIndex - 1 + activeAds.length) % activeAds.length;
-  renderAd(activeAds[currentAdIndex]);
-  // Reset timer on manual navigation
-  startAdRotation();
-};
-
-window.toggleAdMinimize = function(btn) {
-  const container = btn.closest(".floating-ad-container");
-  container.classList.toggle("minimized");
-  btn.textContent = container.classList.contains("minimized") ? "□" : "_";
-};
-
-window.dismissAd = function(adId) {
-  console.log("[ADS] Advertisement closed");
-  const container = document.querySelector(".floating-ad-container");
-  if (container) {
-    container.style.opacity = "0";
-    container.style.transform = "translateX(50px) scale(0.95)";
-    setTimeout(() => container.remove(), 500);
-  }
-
-  // Set hidden period for 60 seconds
-  const hideFor = 60000;
-  const until = Date.now() + hideFor;
-  sessionStorage.setItem('ad_hidden', 'true');
-  sessionStorage.setItem('ad_hidden_until', until.toString());
-  console.log("[ADS] Hidden for 60 seconds");
-
-  if (adRotationInterval) clearInterval(adRotationInterval);
-
-  // Set timeout to restore ad automatically
-  if (adRestoreTimeout) clearTimeout(adRestoreTimeout);
-  adRestoreTimeout = setTimeout(() => {
-    console.log("[ADS] Advertisement restored");
-    console.log("[ADS] Rotation resumed");
-    sessionStorage.removeItem('ad_hidden');
-    sessionStorage.removeItem('ad_hidden_until');
-    renderAd(activeAds[currentAdIndex]);
-    startAdRotation();
-  }, hideFor);
-};
-
 function renderBannerAds() {
   const topBanners = document.querySelectorAll(".ad-banner-top");
   const footerBanners = document.querySelectorAll(".ad-banner-footer");
   
-  if (activeAds.length === 0) return;
+  if (activeAds.length === 0) {
+    topBanners.forEach(container => { container.replaceChildren(); });
+    footerBanners.forEach(container => { container.replaceChildren(); });
+    return;
+  }
 
   const renderTo = (containers, ad) => {
     containers.forEach(container => {
@@ -923,7 +734,7 @@ function renderBannerAds() {
           <span class="ad-banner-label">Advertisement</span>
           <div class="ad-banner-content">
             <a href="${ad.link_url || '#'}" target="_blank" onclick="trackAdClick('${ad.id}')" style="text-decoration: none; color: inherit; display: flex; align-items: center; gap: 1.5rem; text-align: left; max-width: 800px;">
-              ${ad.image_url ? `<img src="${ad.image_url}" style="width: 120px; height: 80px; object-fit: cover; border-radius: var(--border-radius-md);">` : ''}
+              ${ad.image_url ? `<img src="${ad.image_url}" loading="lazy" decoding="async" style="width: 120px; height: 80px; object-fit: cover; border-radius: var(--border-radius-md);">` : ''}
               <div>
                 <h4 style="margin: 0 0 0.25rem 0; font-size: 1.1rem;">${ad.title}</h4>
                 <p style="margin: 0; font-size: 0.9rem; color: var(--text-secondary);">${ad.description || ''}</p>
@@ -932,6 +743,7 @@ function renderBannerAds() {
           </div>
         </div>
       `;
+      trackAdImpression(ad.id);
     });
   };
 
@@ -950,7 +762,8 @@ window.trackAdClick = async function(adId) {
  * Track Advertisement Impression
  */
 async function trackAdImpression(adId) {
-  if (!window.supabaseClient || !adId) return;
+  if (!window.supabaseClient || !adId || viewedAdIds.has(adId)) return;
+  viewedAdIds.add(adId);
 
   const countEl = document.getElementById(`ad-impressions-${adId}`);
   const currentCount = countEl ? parseInt(countEl.textContent) : 0;
@@ -968,182 +781,16 @@ function runCoreStartup() {
     if (!window.supabaseClient) {
         window.addEventListener('supabaseReady', () => {
             syncGlobalSessionUI();
-            initFloatingAds();
+            initAdvertisements();
             initRealtimeSubscriptions();
         }, { once: true });
         return;
     }
     // If already exists, run immediately
     syncGlobalSessionUI();
-    initFloatingAds();
+    initAdvertisements();
     initRealtimeSubscriptions();
 }
 
 // Intercept existing DOMContentLoaded logic to use our wrapper
 document.addEventListener("DOMContentLoaded", runCoreStartup);
-/**
- * Mandatory refresh prompt for visits resumed after a long absence.
- */
-(function MEBV_RefreshSystem() {
-    const RETURN_REFRESH_INACTIVITY_MS = 30 * 60 * 1000;
-    const LAST_ACTIVE_KEY = "mebv_last_active_at";
-    const LAST_HIDDEN_KEY = "mebv_last_hidden_at";
-    const REFRESHING_KEY = "mebv_refresh_in_progress";
-    const PROMPTED_KEY = "mebv_refresh_prompted";
-    const ACTIVITY_WRITE_INTERVAL_MS = 15_000;
-    let promptOpen = false;
-    let refreshStarted = false;
-    let lastActivityWrite = 0;
-
-    const readTimestamp = (key) => {
-        try {
-            const value = Number(localStorage.getItem(key));
-            return Number.isFinite(value) && value > 0 ? value : 0;
-        } catch (error) {
-            console.warn("[Refresh Prompt] Could not read visit state:", error);
-            return 0;
-        }
-    };
-
-    const writeTimestamp = (key, value) => {
-        try {
-            localStorage.setItem(key, String(value));
-            return true;
-        } catch (error) {
-            console.warn("[Refresh Prompt] Could not save visit state:", error);
-            return false;
-        }
-    };
-
-    const readSessionFlag = (key) => {
-        try {
-            return sessionStorage.getItem(key) === "true";
-        } catch (error) {
-            console.warn("[Refresh Prompt] Could not read tab state:", error);
-            return false;
-        }
-    };
-
-    const showMandatoryPrompt = () => {
-        if (promptOpen || refreshStarted || readSessionFlag(PROMPTED_KEY)) return;
-        if (typeof window.hasActiveBookDownload === "function" && window.hasActiveBookDownload()) return;
-
-        let overlay = document.getElementById("refresh-overlay");
-        if (!overlay) {
-            overlay = document.createElement("div");
-            overlay.id = "refresh-overlay";
-            overlay.className = "refresh-modal-overlay";
-            overlay.innerHTML = `
-                <section class="refresh-modal-box" role="alertdialog" aria-modal="true"
-                    aria-labelledby="refresh-title" aria-describedby="refresh-message">
-                    <h2 class="refresh-modal-title" id="refresh-title">Refresh Required</h2>
-                    <p class="refresh-modal-message" id="refresh-message">
-                        You have been away for a while. Refresh the application to continue.
-                    </p>
-                    <div class="refresh-modal-actions">
-                        <button class="btn btn-primary" id="refresh-btn-now" type="button">Refresh Now</button>
-                    </div>
-                </section>`;
-            document.body.appendChild(overlay);
-            overlay.addEventListener("click", (event) => event.stopPropagation());
-            document.addEventListener("keydown", (event) => {
-                if (!promptOpen) return;
-                if (event.key === "Escape") event.preventDefault();
-                if (event.key === "Tab") {
-                    event.preventDefault();
-                    document.getElementById("refresh-btn-now")?.focus();
-                }
-            });
-            document.getElementById("refresh-btn-now").addEventListener("click", () => {
-                if (refreshStarted) return;
-                refreshStarted = true;
-                try {
-                    sessionStorage.setItem(REFRESHING_KEY, "true");
-                    localStorage.setItem(PROMPTED_KEY, "true");
-                } catch (error) {
-                    console.warn("[Refresh Prompt] Could not save refresh state:", error);
-                }
-                window.location.reload();
-            });
-        }
-
-        promptOpen = true;
-        try {
-            sessionStorage.setItem(PROMPTED_KEY, "true");
-        } catch (error) {
-            console.warn("[Refresh Prompt] Could not save prompt state:", error);
-        }
-        overlay.classList.add("active");
-        document.getElementById("refresh-btn-now")?.focus();
-    };
-
-    const checkReturn = () => {
-        if (document.visibilityState === "hidden" || promptOpen || refreshStarted) return;
-
-        try {
-            if (sessionStorage.getItem(REFRESHING_KEY) === "true") {
-                sessionStorage.removeItem(REFRESHING_KEY);
-                sessionStorage.removeItem(PROMPTED_KEY);
-                writeTimestamp(LAST_ACTIVE_KEY, Date.now());
-                localStorage.removeItem(LAST_HIDDEN_KEY);
-                return;
-            }
-        } catch (error) {
-            console.warn("[Refresh Prompt] Could not restore refresh state:", error);
-        }
-
-        const lastHiddenAt = readTimestamp(LAST_HIDDEN_KEY);
-        const lastActiveAt = readTimestamp(LAST_ACTIVE_KEY);
-        const lastSeenAt = lastHiddenAt || lastActiveAt;
-        if (!lastSeenAt) {
-            writeTimestamp(LAST_ACTIVE_KEY, Date.now());
-            return;
-        }
-
-        if (Date.now() - lastSeenAt >= RETURN_REFRESH_INACTIVITY_MS) {
-            showMandatoryPrompt();
-            return;
-        }
-
-        writeTimestamp(LAST_ACTIVE_KEY, Date.now());
-        try {
-            localStorage.removeItem(LAST_HIDDEN_KEY);
-        } catch (error) {
-            console.warn("[Refresh Prompt] Could not clear return timestamp:", error);
-        }
-    };
-
-    const recordHiddenTime = () => {
-        if (document.visibilityState !== "hidden") return;
-        writeTimestamp(LAST_HIDDEN_KEY, Date.now());
-    };
-
-    const recordPageHideTime = () => {
-        writeTimestamp(LAST_HIDDEN_KEY, Date.now());
-    };
-
-    const recordActivity = () => {
-        if (document.visibilityState === "hidden" || promptOpen) return;
-        const now = Date.now();
-        try {
-            localStorage.removeItem(LAST_HIDDEN_KEY);
-        } catch (error) {
-            console.warn("[Refresh Prompt] Could not clear return timestamp:", error);
-        }
-        if (now - lastActivityWrite < ACTIVITY_WRITE_INTERVAL_MS) return;
-        lastActivityWrite = now;
-        writeTimestamp(LAST_ACTIVE_KEY, now);
-    };
-
-    document.addEventListener("visibilitychange", () => {
-        if (document.visibilityState === "hidden") recordHiddenTime();
-        else checkReturn();
-    });
-    window.addEventListener("pagehide", recordPageHideTime);
-    window.addEventListener("pageshow", checkReturn);
-    window.addEventListener("pointerdown", recordActivity, { passive: true });
-    window.addEventListener("keydown", recordActivity, { passive: true });
-    window.addEventListener("touchstart", recordActivity, { passive: true });
-    window.addEventListener("mebv:book-download-settled", checkReturn);
-    checkReturn();
-})();

@@ -6,6 +6,7 @@ import mimetypes
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import zipfile
@@ -25,7 +26,11 @@ warnings.simplefilter("error", Image.DecompressionBombWarning)
 app = FastAPI()
 logger = logging.getLogger("document-renderer")
 MAX_FILE_SIZE = 25 * 1024 * 1024
-MAX_PREVIEW_SIZE = 10 * 1024 * 1024
+MAX_PREVIEW_SIZE = 4 * 1024 * 1024
+MAX_PREVIEW_DIMENSIONS = (900, 1273)
+MAX_SOURCE_PIXELS = 40_000_000
+MAX_ARCHIVE_FILES = 1000
+MAX_ARCHIVE_SIZE = 100 * 1024 * 1024
 TOKEN = os.environ.get("DOCUMENT_RENDERER_TOKEN", "")
 
 EXTENSION_MIMES = {
@@ -47,6 +52,12 @@ EXTENSION_MIMES = {
     "png": {"image/png"},
     "webp": {"image/webp"},
     "gif": {"image/gif"},
+    "zip": {
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/x-zip",
+        "multipart/x-zip",
+    },
 }
 
 def error(status: int, message: str):
@@ -55,9 +66,13 @@ def error(status: int, message: str):
 
 def detect_format(filename: str, content_type: str, data: bytes) -> str:
     extension = Path(filename).suffix.lower().lstrip(".")
+    normalized = content_type.lower().split(";", 1)[0].strip()
+    if not extension and normalized in EXTENSION_MIMES["zip"]:
+        extension = "zip"
+    elif not extension and normalized == "application/octet-stream" and zipfile.is_zipfile(io.BytesIO(data)):
+        extension = "zip"
     if extension not in EXTENSION_MIMES:
         raise ValueError(f"Unsupported format: {content_type or extension or 'unknown MIME type'}")
-    normalized = content_type.lower().split(";", 1)[0].strip()
     if normalized and normalized != "application/octet-stream" and normalized not in EXTENSION_MIMES[extension]:
         raise ValueError(f"File extension .{extension} does not match MIME type {normalized}.")
 
@@ -94,9 +109,20 @@ def detect_format(filename: str, content_type: str, data: bytes) -> str:
 
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            names = set(archive.namelist())
-            if sum(item.file_size for item in archive.infolist()) > 100 * 1024 * 1024:
+            items = archive.infolist()
+            if len(items) > MAX_ARCHIVE_FILES:
+                raise ValueError("Archive contains too many files to process.")
+            if sum(item.file_size for item in items) > MAX_ARCHIVE_SIZE:
                 raise ValueError("Expanded document exceeds the 100 MB processing limit.")
+            if extension == "zip":
+                if not any(not item.is_dir() for item in items):
+                    raise ValueError("ZIP archive contains no files.")
+                corrupt_file = archive.testzip()
+                if corrupt_file:
+                    raise ValueError(f"ZIP archive contains corrupt data: {Path(corrupt_file).name}.")
+                return extension
+
+            names = {item.filename for item in items}
             if extension == "docx" and "word/document.xml" not in names:
                 raise ValueError("DOCX archive does not contain a document body.")
             if extension == "pptx" and not any(name.startswith("ppt/slides/slide") for name in names):
@@ -112,9 +138,33 @@ def detect_format(filename: str, content_type: str, data: bytes) -> str:
                 media_type = archive.read("mimetype").decode("ascii").strip()
                 if media_type != "application/epub+zip":
                     raise ValueError("EPUB archive is missing its required MIME declaration.")
-    except (zipfile.BadZipFile, KeyError, UnicodeDecodeError) as exc:
+    except (zipfile.BadZipFile, KeyError, UnicodeDecodeError, RuntimeError) as exc:
         raise ValueError(f"{extension.upper()} document archive is invalid: {exc}") from exc
     return extension
+
+
+def extract_zip_document(data: bytes) -> tuple[str, str, bytes]:
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            for item in archive.infolist():
+                if item.is_dir() or item.file_size > MAX_FILE_SIZE:
+                    continue
+                if (item.external_attr >> 16) & 0o170000 == stat.S_IFLNK:
+                    continue
+                filename = Path(item.filename).name
+                extension = Path(filename).suffix.lower().lstrip(".")
+                if extension not in EXTENSION_MIMES or extension == "zip":
+                    continue
+                document = archive.read(item)
+                content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+                try:
+                    detect_format(filename, content_type, document)
+                except ValueError:
+                    continue
+                return filename, extension, document
+    except (zipfile.BadZipFile, RuntimeError, OSError) as exc:
+        raise ValueError(f"ZIP archive could not be processed: {exc}") from exc
+    raise ValueError("ZIP archive contains no supported, valid document to preview.")
 
 
 def run_command(command: list[str], failure_message: str, timeout: int = 60):
@@ -127,14 +177,60 @@ def run_command(command: list[str], failure_message: str, timeout: int = 60):
         raise RuntimeError(f"{failure_message}{': ' + detail if detail else '.'}")
 
 
-def image_preview(data: bytes) -> tuple[bytes, str]:
+def image_preview(data: bytes, preserve_text: bool = False) -> tuple[bytes, str]:
     try:
         with Image.open(io.BytesIO(data)) as original:
+            if original.width * original.height > MAX_SOURCE_PIXELS:
+                raise RuntimeError("Source image exceeds the 40-megapixel preview limit.")
             original.seek(0)
-            image = ImageOps.exif_transpose(original.copy()).convert("RGB")
-            target = io.BytesIO()
-            image.save(target, format="PNG", optimize=True)
-            return target.getvalue(), "image/png"
+            image = ImageOps.exif_transpose(original)
+            image.thumbnail(MAX_PREVIEW_DIMENSIONS, Image.Resampling.LANCZOS)
+            image = image.convert("RGB")
+
+            grayscale_histogram = image.convert("L").histogram()
+            light_background_ratio = sum(grayscale_histogram[240:]) / (image.width * image.height)
+            preserve_lossless = preserve_text or light_background_ratio >= 0.45
+
+            def encode_png(source: Image.Image) -> bytes:
+                target = io.BytesIO()
+                source.save(target, format="PNG", optimize=True)
+                return target.getvalue()
+
+            png_bytes = encode_png(image)
+            if preserve_lossless:
+                preview_bytes, preview_mime = png_bytes, "image/png"
+            else:
+                target = io.BytesIO()
+                image.save(target, format="JPEG", quality=86, optimize=True, progressive=True)
+                jpeg_bytes = target.getvalue()
+                if len(jpeg_bytes) <= len(png_bytes) * 0.8:
+                    preview_bytes, preview_mime = jpeg_bytes, "image/jpeg"
+                else:
+                    preview_bytes, preview_mime = png_bytes, "image/png"
+
+            while len(preview_bytes) > MAX_PREVIEW_SIZE and min(image.size) > 720:
+                resized_dimensions = (
+                    max(1, int(image.width * 0.85)),
+                    max(1, int(image.height * 0.85))
+                )
+                image = image.resize(resized_dimensions, Image.Resampling.LANCZOS)
+                png_bytes = encode_png(image)
+                if preserve_lossless:
+                    preview_bytes, preview_mime = png_bytes, "image/png"
+                else:
+                    target = io.BytesIO()
+                    image.save(target, format="JPEG", quality=86, optimize=True, progressive=True)
+                    jpeg_bytes = target.getvalue()
+                    if len(jpeg_bytes) <= len(png_bytes) * 0.8:
+                        preview_bytes, preview_mime = jpeg_bytes, "image/jpeg"
+                    else:
+                        preview_bytes, preview_mime = png_bytes, "image/png"
+
+            if len(preview_bytes) > MAX_PREVIEW_SIZE:
+                raise RuntimeError("Optimized preview exceeds the 4 MB storage limit.")
+            return preview_bytes, preview_mime
+    except RuntimeError:
+        raise
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise RuntimeError(f"Unable to decode the document image: {exc}") from exc
 
@@ -170,8 +266,6 @@ def epub_to_pdf(source: Path, output: Path):
             break
     if cover:
         result = image_preview(cover)
-        if len(result[0]) > MAX_PREVIEW_SIZE:
-            raise RuntimeError("Generated EPUB cover exceeds the 10 MB storage limit.")
         return result[0], result[1], image_text(cover)
 
     documents = []
@@ -218,7 +312,7 @@ def epub_to_pdf(source: Path, output: Path):
 
 def render_pdf_page(pdf_path: Path, output_prefix: Path) -> bytes:
     run_command(
-        ["pdftoppm", "-f", "1", "-l", "1", "-singlefile", "-png", "-r", "180", str(pdf_path), str(output_prefix)],
+        ["pdftoppm", "-f", "1", "-l", "1", "-singlefile", "-png", "-scale-to", str(MAX_PREVIEW_DIMENSIONS[1]), str(pdf_path), str(output_prefix)],
         "Unable to render the first page"
     )
     rendered = output_prefix.with_suffix(".png")
@@ -266,6 +360,9 @@ async def render(file: UploadFile = File(...), authorization: str | None = Heade
     content_type = file.content_type or ""
     try:
         extension = detect_format(filename, content_type, data)
+        source_format = extension
+        if extension == "zip":
+            filename, extension, data = extract_zip_document(data)
         if extension in {"jpg", "jpeg", "png", "webp", "gif"}:
             image_bytes, image_mime = image_preview(data)
             text = image_text(data)
@@ -301,20 +398,23 @@ async def render(file: UploadFile = File(...), authorization: str | None = Heade
                         generated_pdf = matches[0]
                     pdf_path = generated_pdf
 
-                image_bytes = render_pdf_page(pdf_path, work / "first-page")
+                rendered_page = render_pdf_page(pdf_path, work / "first-page")
                 text = extract_pdf_text(pdf_path)
                 if not text.strip():
-                    text = image_text(image_bytes)
-                image_mime = "image/png"
+                    text = image_text(rendered_page)
+                image_bytes, image_mime = image_preview(
+                    rendered_page,
+                    preserve_text=bool(re.search(r"[A-Za-z]{3,}", text))
+                )
 
         if len(image_bytes) > MAX_PREVIEW_SIZE:
-            raise RuntimeError("Generated first-page image exceeds the 10 MB storage limit.")
+            raise RuntimeError("Generated preview exceeds the 4 MB storage limit.")
         return {
             "success": True,
             "cover_base64": base64.b64encode(image_bytes).decode("ascii"),
             "cover_mime_type": image_mime,
             "text": text,
-            "rendered_from": extension
+            "rendered_from": source_format
         }
     except ValueError as exc:
         return error(415, str(exc))

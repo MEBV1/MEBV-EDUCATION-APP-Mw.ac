@@ -44,7 +44,7 @@ async function fetchVideos(searchTerm = "", category = "all") {
   try {
     let query = window.supabaseClient
       .from("videos")
-      .select("*")
+      .select("id,title,description,category,thumbnail_url,video_url,views_count,created_at")
       .order("created_at", { ascending: false });
 
     if (category && category !== "all") {
@@ -83,7 +83,7 @@ function renderVideoPlaylist(videos) {
       item.classList.add("active");
     }
     item.innerHTML = `
-      <img src="${video.thumbnail_url || 'LOGO.png'}" alt="${escapeHtml(video.title)} thumbnail" class="playlist-item-thumbnail">
+      <img src="${video.thumbnail_url || 'LOGO.png'}" alt="${escapeHtml(video.title)} thumbnail" class="playlist-item-thumbnail" loading="lazy" decoding="async">
       <div class="playlist-item-content">
         <h3 class="playlist-item-title">${escapeHtml(video.title)}</h3>
         <p style="font-size: 0.8rem; color: var(--text-muted);">${escapeHtml(video.category || 'General')}</p>

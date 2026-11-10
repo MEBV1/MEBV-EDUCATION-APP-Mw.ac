@@ -3,6 +3,7 @@
 
 let blogPosts = [];
 let currentPost = null;
+let commentSubmitPending = false;
 
 window.loadBlogPosts = async function() {
   window.showLoading("Loading blog posts...");
@@ -31,7 +32,7 @@ async function fetchBlogPosts(searchTerm = "", category = "all") {
   try {
     let query = window.supabaseClient
       .from("blog_posts")
-      .select("*")
+      .select("id,title,excerpt,category,featured,featured_image,content,published_at,views_count")
       .order("published_at", { ascending: false });
 
     if (category && category !== "all") {
@@ -144,7 +145,7 @@ async function loadArticleComments(postId) {
   try {
     const { data, error } = await window.supabaseClient
       .from("blog_comments")
-      .select("*")
+      .select("id,name,message,created_at")
       .eq("post_id", postId)
       .order("created_at", { ascending: false });
     if (error) throw error;
@@ -179,7 +180,7 @@ function renderComments(comments) {
 }
 
 async function submitComment() {
-  if (!currentPost) return;
+  if (!currentPost || commentSubmitPending) return;
 
   const name = document.getElementById("comment-name").value.trim();
   const message = document.getElementById("comment-message").value.trim();
@@ -189,6 +190,9 @@ async function submitComment() {
     return;
   }
 
+  commentSubmitPending = true;
+  const submitButton = document.querySelector("#comment-form [type=submit]");
+  if (submitButton) submitButton.disabled = true;
   window.showLoading("Submitting your comment...");
   try {
     if (window.supabaseClient) {
@@ -204,6 +208,8 @@ async function submitComment() {
     console.error("Unable to submit comment:", error);
     window.showError("Could not post comment right now. Try again later.");
   } finally {
+    commentSubmitPending = false;
+    if (submitButton) submitButton.disabled = false;
     window.hideLoading();
   }
 }

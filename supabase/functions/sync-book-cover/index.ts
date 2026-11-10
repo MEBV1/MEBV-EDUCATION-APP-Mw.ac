@@ -19,7 +19,7 @@ const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
 const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
 const allowedRoles = ["admin", "super_admin", "content_manager"];
 const storageBucket = "cms_assets";
-const maxPreviewBytes = 10 * 1024 * 1024;
+const maxPreviewBytes = 4 * 1024 * 1024;
 const failedCoverStates = new Set([
   "unavailable",
   "failed",
@@ -42,6 +42,11 @@ function json(body: unknown, status = 200) {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" }
   });
+}
+
+async function sha256Hex(value: Uint8Array) {
+  const digest = await crypto.subtle.digest("SHA-256", value);
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function getDriveFileId(value: string) {
@@ -137,16 +142,6 @@ Deno.serve(async (request) => {
     if (!book) throw new CoverSyncError(404, "Book record was not found.");
 
     const currentCover = String(book.cover_url || "");
-    if (currentCover && await isValidStoredCover(currentCover)) {
-      return json({ success: true, status: "already_valid", coverUrl: currentCover });
-    }
-    if (!needsCoverSynchronization(currentCover)) {
-      return json({
-        success: true,
-        status: "not_missing",
-        message: "An existing cover URL is present but could not be verified; it was left unchanged."
-      });
-    }
 
     const fileId = getDriveFileId(String(book.drive_file_id || "")) ||
       getDriveFileId(String(book.drive_url || "")) ||
@@ -156,8 +151,25 @@ Deno.serve(async (request) => {
     const apiKey = Deno.env.get("GOOGLE_API_KEY") || Deno.env.get("GOOGLE_DRIVE_API_KEY");
     if (!apiKey) throw new CoverSyncError(500, "Google Drive API credential is not configured.");
 
-    const metadata = await getDriveDocument(fileId, apiKey);
+    const metadata = await getDriveDocument(fileId, apiKey, true);
     fileName = metadata.name;
+    const sourceVersion = metadata.md5Checksum || metadata.modifiedTime || "";
+    let sourceChanged = false;
+    if (currentCover && await isValidStoredCover(currentCover)) {
+      const currentUrl = new URL(currentCover);
+      const savedSourceVersion = currentUrl.searchParams.get("source");
+      if (!savedSourceVersion || !sourceVersion || savedSourceVersion === sourceVersion) {
+        return json({ success: true, status: "already_valid", coverUrl: currentCover });
+      }
+      sourceChanged = true;
+    }
+    if (!needsCoverSynchronization(currentCover) && !sourceChanged) {
+      return json({
+        success: true,
+        status: "not_missing",
+        message: "An existing cover URL is present but could not be verified; it was left unchanged."
+      });
+    }
     const classification = classifyDocument(metadata.name, metadata.mimeType);
     if (!classification.supported) {
       throw new CoverSyncError(415, classification.reason);
@@ -167,7 +179,7 @@ Deno.serve(async (request) => {
     const rendered = await renderDocument(source.bytes, source.filename, source.contentType);
     const previewBytes = base64ToBytes(rendered.coverBase64);
     if (!previewBytes.length || previewBytes.length > maxPreviewBytes) {
-      throw new CoverSyncError(422, `Generated preview for ${metadata.name || book.title} is empty or exceeds the 10 MB limit.`);
+      throw new CoverSyncError(422, `Generated preview for ${metadata.name || book.title} is empty or exceeds the 4 MB limit.`);
     }
 
     const { data: currentRecord, error: currentRecordError } = await serviceClient
@@ -181,10 +193,16 @@ Deno.serve(async (request) => {
     if (!currentRecord) throw new CoverSyncError(404, "Book record was not found.");
     const coverBeforeUpdateValue = currentRecord.cover_url;
     const coverBeforeUpdate = String(coverBeforeUpdateValue || "");
+    let latestSourceChanged = false;
     if (coverBeforeUpdate && await isValidStoredCover(coverBeforeUpdate)) {
-      return json({ success: true, status: "already_valid", coverUrl: coverBeforeUpdate });
+      const latestUrl = new URL(coverBeforeUpdate);
+      const latestSourceVersion = latestUrl.searchParams.get("source");
+      if (!latestSourceVersion || !sourceVersion || latestSourceVersion === sourceVersion) {
+        return json({ success: true, status: "already_valid", coverUrl: coverBeforeUpdate });
+      }
+      latestSourceChanged = true;
     }
-    if (!needsCoverSynchronization(coverBeforeUpdate)) {
+    if (!needsCoverSynchronization(coverBeforeUpdate) && !latestSourceChanged) {
       return json({
         success: true,
         status: "not_missing",
@@ -193,13 +211,42 @@ Deno.serve(async (request) => {
     }
 
     const contentType = rendered.coverMimeType;
-    const path = `books/covers/${bookId}/cover-${crypto.randomUUID()}.png`;
-    const { error: uploadError } = await serviceClient.storage
-      .from(storageBucket)
-      .upload(path, previewBytes, { contentType, cacheControl: "3600", upsert: false });
-    if (uploadError) throw new CoverSyncError(500, `Cover generated successfully but storage upload failed: ${uploadError.message}`);
+    const contentHash = await sha256Hex(previewBytes);
+    const extension = contentType === "image/jpeg" ? "jpg" : "png";
+    const path = `books/covers/${bookId}/${contentHash}.${extension}`;
+    const { data: publicUrlData } = serviceClient.storage.from(storageBucket).getPublicUrl(path);
+    const coverUrlObject = new URL(publicUrlData.publicUrl);
+    if (sourceVersion) coverUrlObject.searchParams.set("source", sourceVersion);
+    const coverUrl = coverUrlObject.toString();
 
-    const coverUrl = `${serviceClient.storage.from(storageBucket).getPublicUrl(path).data.publicUrl}?v=${Date.now()}`;
+    const sameContentAsCurrent = (() => {
+      if (!coverBeforeUpdate) return false;
+      try {
+        return new URL(coverBeforeUpdate).pathname.endsWith(`/${contentHash}.${extension}`);
+      } catch {
+        return false;
+      }
+    })();
+    if (sameContentAsCurrent) {
+      return json({ success: true, status: "already_valid", coverUrl: coverBeforeUpdate });
+    }
+
+    if (!await isValidStoredCover(coverUrl)) {
+      const { error: uploadError } = await serviceClient.storage
+        .from(storageBucket)
+        .upload(path, previewBytes, {
+          contentType,
+          cacheControl: "31536000",
+          upsert: false
+        });
+      if (uploadError && !await isValidStoredCover(coverUrl)) {
+        throw new CoverSyncError(500, `Cover generated successfully but storage upload failed: ${uploadError.message}`);
+      }
+    }
+
+    if (coverBeforeUpdate === coverUrl) {
+      return json({ success: true, status: "already_valid", coverUrl });
+    }
     let updateQuery = serviceClient
       .from("books")
       .update({ cover_url: coverUrl })

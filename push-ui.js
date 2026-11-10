@@ -34,14 +34,6 @@ async function initializePushPwa() {
         updateViaCache: "none"
       });
       await navigator.serviceWorker.ready;
-      pushWorkerRegistration.addEventListener("updatefound", () => {
-        const installing = pushWorkerRegistration.installing;
-        installing?.addEventListener("statechange", () => {
-          if (installing.state === "installed" && navigator.serviceWorker.controller) {
-            window.showToast?.("A MEBV update is ready. Reload to use the latest version.", "info");
-          }
-        });
-      });
       await associateSubscriptionAfterLogin();
     } catch (error) {
       console.error("PWA service worker could not be registered:", error);

@@ -45,25 +45,6 @@
   <main class="container">
     <div class="ad-banner-top"></div>
 
-    <dialog id="book-service-announcement" class="book-service-dialog" aria-labelledby="book-service-announcement-title">
-      <div class="book-service-dialog-content">
-        <div class="book-service-dialog-icon" aria-hidden="true">📚</div>
-        <p class="book-service-dialog-label">Service update</p>
-        <h2 id="book-service-announcement-title">FREE BOOK DOWNLOADS — SERVICE UPDATE</h2>
-        <p>Our free book download service is temporarily unavailable due to a technical service limitation. We expect the service to resume on <strong>7 November 2026</strong>.</p>
-        <p>Thank you for your patience. Please check back soon for free educational books and learning resources.</p>
-        <div class="book-service-countdown">
-          <span class="book-service-countdown-label">Time remaining</span>
-          <p id="book-service-countdown" aria-live="off"></p>
-        </div>
-        <div class="book-service-dialog-contact" aria-label="Contact support">
-          <a href="https://wa.me/265993984344" class="btn btn-primary" target="_blank" rel="noopener noreferrer">WhatsApp Support</a>
-          <a href="tel:0893984344" class="btn btn-outline">Call Support</a>
-          <a href="mailto:malawieducationbooksandvacanci@gmail.com" class="btn btn-outline">Email Support</a>
-        </div>
-      </div>
-    </dialog>
-
     <section class="books-hero" style="margin-top: 2rem;">
       <h1 style="font-size: 2.25rem; font-weight: 800; margin-bottom: 1rem;">Find Curriculum Books, Past Papers and Guides</h1>
       <p style="font-size: 1rem; color: var(--text-secondary); max-width: 760px; margin: 0 auto 2rem;">
@@ -95,6 +76,7 @@
     <section class="book-catalog-section">
       <h2 style="font-size: 1.75rem; font-weight: 800; margin-bottom: 1rem;">All Books</h2>
       <div id="books-list" class="grid-layout book-catalog-grid"></div>
+      <button id="load-more-books" class="btn btn-outline" type="button" style="display: none; margin: 1.5rem auto 0;">Load More Books</button>
     </section>
 
     <!-- Floating Advertisements -->
@@ -179,16 +161,69 @@
     const bookRatingOptions = [1, 2, 3, 4, 5];
     let selectedRating = 5;
     let currentBookId = null;
+    const bookPageSize = 50;
+    let loadedCatalogBooks = [];
+    let catalogPageOffset = 0;
+    let catalogLoadGeneration = 0;
+    let catalogPageLoading = false;
+    let bookCatalogPollCursor = new Date(Date.now() - 2000).toISOString();
+    let bookCatalogRefreshTimer = null;
+    let bookCatalogLastCheck = Date.now();
+    let bookCatalogPollInFlight = false;
+    let bookCatalogLoadInFlight = false;
+    let bookCatalogLoadPending = false;
+    const bookCatalogSelect = "id,title,author,description,category,cover_url,downloads_count,average_rating,featured,is_active,created_at,updated_at";
 
     window.loadBooks = async function() {
+      if (bookCatalogLoadInFlight) {
+        bookCatalogLoadPending = true;
+        return;
+      }
+      bookCatalogLoadInFlight = true;
+      const generation = ++catalogLoadGeneration;
+      catalogPageOffset = 0;
+      loadedCatalogBooks = [];
+      document.getElementById("load-more-books").style.display = "none";
       window.showLoading("Loading books...");
       try {
         const searchTerm = document.getElementById("book-search").value;
         const category = document.getElementById("book-category").value;
-        const books = await window.fetchBooks(searchTerm, category);
-        renderBooksList(books);
+        const books = await window.fetchBooks(searchTerm, category, 0, bookPageSize);
+        if (generation !== catalogLoadGeneration) return;
+        loadedCatalogBooks = books;
+        catalogPageOffset = books.length;
+        window.renderBooksList(books);
+        document.getElementById("load-more-books").style.display = books.length === bookPageSize ? "flex" : "none";
       } finally {
-        window.hideLoading();
+        if (generation === catalogLoadGeneration) window.hideLoading();
+        bookCatalogLoadInFlight = false;
+        if (bookCatalogLoadPending) {
+          bookCatalogLoadPending = false;
+          window.loadBooks();
+        }
+      }
+    }
+
+    async function loadMoreBooks() {
+      if (catalogPageLoading) return;
+      catalogPageLoading = true;
+      const generation = catalogLoadGeneration;
+      const button = document.getElementById("load-more-books");
+      button.disabled = true;
+      try {
+        const searchTerm = document.getElementById("book-search").value;
+        const category = document.getElementById("book-category").value;
+        const books = await window.fetchBooks(searchTerm, category, catalogPageOffset, bookPageSize);
+        if (generation !== catalogLoadGeneration) return;
+        const existingIds = new Set(loadedCatalogBooks.map(book => book.id));
+        const newBooks = books.filter(book => !existingIds.has(book.id));
+        loadedCatalogBooks.push(...newBooks);
+        catalogPageOffset += books.length;
+        window.renderBooksList(newBooks, true);
+        button.style.display = books.length === bookPageSize ? "flex" : "none";
+      } finally {
+        catalogPageLoading = false;
+        button.disabled = false;
       }
     }
 
@@ -196,7 +231,8 @@
       try {
         const { data, error } = await window.supabaseClient
           .from("books")
-          .select("*")
+          .select(bookCatalogSelect)
+          .eq("is_active", true)
           .eq("featured", true)
           .order("created_at", { ascending: false })
           .limit(4);
@@ -208,18 +244,150 @@
       }
     }
 
+    function bookMatchesCurrentCatalog(book) {
+      if (!book || book.is_active !== true) return false;
+      const category = document.getElementById("book-category").value;
+      if (category !== "all" && book.category !== category) return false;
+      const searchTerm = document.getElementById("book-search").value.trim().toLowerCase();
+      if (!searchTerm) return true;
+      return [book.title, book.author, book.description]
+        .some(value => String(value || "").toLowerCase().includes(searchTerm));
+    }
+
+    window.applyBookRealtimeChange = function(eventType, newBook, oldBook) {
+      const book = eventType === "DELETE" ? oldBook : (newBook || oldBook);
+      if (!book?.id) return false;
+      const currentIndex = loadedCatalogBooks.findIndex(item => item.id === book.id);
+      const currentBook = currentIndex >= 0 ? loadedCatalogBooks[currentIndex] : null;
+      const relevantFields = ["title", "author", "description", "category", "cover_url", "featured", "is_active", "average_rating", "created_at"];
+      const contentChanged = eventType !== "UPDATE" || !currentBook ||
+        relevantFields.some(field => currentBook[field] !== newBook?.[field]);
+      if (!contentChanged && eventType === "UPDATE") {
+        if (currentBook && currentBook.downloads_count !== newBook.downloads_count) {
+          document.querySelectorAll(`#book-downloads-${CSS.escape(book.id)}, [data-download-count-for="${CSS.escape(book.id)}"]`)
+            .forEach(element => {
+              element.textContent = element.classList.contains("mebv-counts")
+                ? `${newBook.downloads_count || 0} DLs`
+                : String(newBook.downloads_count || 0);
+            });
+          currentBook.downloads_count = newBook.downloads_count;
+        }
+        return false;
+      }
+
+      if (currentIndex >= 0) loadedCatalogBooks.splice(currentIndex, 1);
+      const matchesCatalog = eventType !== "DELETE" && bookMatchesCurrentCatalog(newBook);
+      if (matchesCatalog) {
+        loadedCatalogBooks.push(newBook);
+        loadedCatalogBooks.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+        if (currentIndex < 0 && eventType !== "DELETE") catalogPageOffset += 1;
+      } else if (currentIndex >= 0) {
+        catalogPageOffset = Math.max(0, catalogPageOffset - 1);
+      }
+      if (currentIndex >= 0 || matchesCatalog) {
+        window.syncBookCatalogCards(loadedCatalogBooks);
+        const moreButton = document.getElementById("load-more-books");
+        moreButton.style.display = catalogPageOffset >= bookPageSize ? "flex" : "none";
+      }
+      return contentChanged;
+    };
+
+    async function pollBookCatalogChanges() {
+      if (bookCatalogPollInFlight || document.visibilityState !== "visible" || !window.supabaseClient) return;
+      const since = new Date(Date.parse(bookCatalogPollCursor) - 2000).toISOString();
+      bookCatalogPollInFlight = true;
+      try {
+        const updates = new Map();
+        const loadPages = async (buildQuery) => {
+          let lastUpdatedAt = null;
+          let lastId = null;
+          while (true) {
+            let query = buildQuery()
+              .order("updated_at", { ascending: true })
+              .order("id", { ascending: true });
+            if (lastUpdatedAt && lastId) {
+              query = query.or(
+                `updated_at.gt.${lastUpdatedAt},and(updated_at.eq.${lastUpdatedAt},id.gt.${lastId})`
+              );
+            }
+            const { data, error } = await query.range(0, bookPageSize - 1);
+            if (error) throw error;
+            (data || []).forEach(book => updates.set(book.id, book));
+            if (!data || data.length < bookPageSize) break;
+            const lastBook = data[data.length - 1];
+            lastUpdatedAt = lastBook.updated_at;
+            lastId = lastBook.id;
+          }
+        };
+
+        await loadPages(() => window.supabaseClient
+          .from("books")
+          .select(bookCatalogSelect)
+          .eq("is_active", true)
+          .gt("updated_at", since));
+
+        const loadedIds = loadedCatalogBooks.map(book => book.id);
+        for (let offset = 0; offset < loadedIds.length; offset += bookPageSize) {
+          const ids = loadedIds.slice(offset, offset + bookPageSize);
+          await loadPages(() => window.supabaseClient
+            .from("books")
+            .select(bookCatalogSelect)
+            .eq("is_active", false)
+            .in("id", ids)
+            .gt("updated_at", since));
+        }
+
+        updates.forEach(book => window.applyBookRealtimeChange("UPDATE", book, null));
+        const latestUpdate = Array.from(updates.values())
+          .reduce((latest, book) => Date.parse(book.updated_at) > Date.parse(latest)
+            ? book.updated_at
+            : latest, bookCatalogPollCursor);
+        bookCatalogPollCursor = latestUpdate;
+      } catch (error) {
+        console.warn("Could not check for book catalog updates:", error);
+      } finally {
+        bookCatalogPollInFlight = false;
+        bookCatalogLastCheck = Date.now();
+      }
+    }
+
+    function stopBookCatalogPolling() {
+      if (bookCatalogRefreshTimer !== null) {
+        clearTimeout(bookCatalogRefreshTimer);
+        bookCatalogRefreshTimer = null;
+      }
+    }
+
+    function syncBookCatalogPolling() {
+      if (document.visibilityState !== "visible" || window.bookRealtimeConnected === true) {
+        stopBookCatalogPolling();
+        return;
+      }
+      if (bookCatalogRefreshTimer !== null) return;
+      const delay = Math.max(0, 180000 - (Date.now() - bookCatalogLastCheck));
+      bookCatalogRefreshTimer = setTimeout(() => {
+        bookCatalogRefreshTimer = null;
+        pollBookCatalogChanges().finally(syncBookCatalogPolling);
+      }, delay);
+    }
+
     document.addEventListener("DOMContentLoaded", async () => {
       const searchInput = document.getElementById("book-search");
       const categorySelect = document.getElementById("book-category");
       const reviewForm = document.getElementById("book-review-form");
+      const loadMoreButton = document.getElementById("load-more-books");
 
       searchInput.addEventListener("input", debounce(window.loadBooks, 350));
       categorySelect.addEventListener("change", window.loadBooks);
+      loadMoreButton.addEventListener("click", loadMoreBooks);
       reviewForm.addEventListener("submit", handleReviewSubmit);
 
       renderRatingStars();
       await window.loadBooks();
       window.loadFeaturedBooks();
+      syncBookCatalogPolling();
+      document.addEventListener("visibilitychange", syncBookCatalogPolling);
+      window.addEventListener("mebv:book-realtime-status", syncBookCatalogPolling);
       const bookId = new URLSearchParams(window.location.search).get("id");
       if (bookId) await openBookDetails(bookId);
     });
@@ -441,7 +609,7 @@ window.renderFeaturedBooks = function(books) {
 
         card.innerHTML = `
           <div class="card-img-wrapper">
-            ${window.renderBookCoverPreview(book, book.title + " cover")}
+          ${window.renderBookCoverPreview(book, book.title + " cover", "featured")}
             <p class="card-badge">Featured</p>
           </div>
           <div class="card-content">
@@ -463,41 +631,93 @@ window.renderFeaturedBooks = function(books) {
     });
 };
 
-window.renderBooksList = function(books) {
+function updateBookCatalogCard(card, book, prioritizeImage = false) {
+    card.dataset.coverUrl = book.cover_url || "";
+    card.querySelector(".book-card-meta").textContent = `${book.category || "Books"} • ${book.author || "Admin"}`;
+    card.querySelector(".card-title").textContent = book.title || "";
+    card.querySelector(".mebv-stars").textContent = renderDynamicStars(book.average_rating);
+    const downloads = card.querySelector(".mebv-counts");
+    downloads.textContent = `${book.downloads_count || 0} DLs`;
+    downloads.dataset.downloadCountFor = book.id;
+
+    const image = card.querySelector(".book-cover-image");
+    if (image) {
+      image.loading = prioritizeImage ? "eager" : "lazy";
+      image.fetchPriority = prioritizeImage ? "high" : "auto";
+    }
+
+    const coverUrl = book.cover_url || "";
+    if (card.dataset.renderedCoverUrl !== coverUrl) {
+      const imageWrapper = card.querySelector(".card-img-wrapper");
+      imageWrapper.innerHTML = window.renderBookCoverPreview(
+        book,
+        `${book.title || "Book"} cover`,
+        prioritizeImage ? "first-visible" : "card"
+      );
+      card.dataset.renderedCoverUrl = coverUrl;
+    }
+}
+
+function createBookCatalogCard(book, prioritizeImage = false) {
+    const card = document.createElement("article");
+    card.className = "card";
+    card.dataset.bookId = book.id;
+    card.dataset.coverUrl = book.cover_url || "";
+    card.dataset.renderedCoverUrl = book.cover_url || "";
+    card.innerHTML = `
+      <div class="card-img-wrapper">
+        ${window.renderBookCoverPreview(book, `${book.title || "Book"} cover`, prioritizeImage ? "first-visible" : "card")}
+      </div>
+      <div class="card-content">
+        <p class="book-card-meta">${escapeHtml(book.category || 'Books')} &bull; ${escapeHtml(book.author || 'Admin')}</p>
+        <h3 class="card-title">${escapeHtml(book.title)}</h3>
+        <div class="mebv-meta-row">
+          <span class="mebv-stars">${renderDynamicStars(book.average_rating)}</span>
+          <span class="mebv-counts" data-download-count-for="${book.id}">${book.downloads_count || 0} DLs</span>
+        </div>
+        <div class="mebv-card-footer">
+          <button class="btn btn-outline btn-sm" onclick="openBookDetails('${book.id}')">📖 Details</button>
+          <button class="btn btn-primary btn-sm" onclick="executeQuickDownload(event, '${book.id}')">⬇ Download</button>
+        </div>
+      </div>
+    `;
+    updateBookCatalogCard(card, book, prioritizeImage);
+    return card;
+}
+
+window.renderBooksList = function(books, append = false) {
     const booksList = document.getElementById("books-list");
     if (!booksList) return;
-    booksList.innerHTML = "";
+    if (!append) booksList.innerHTML = "";
     
     if (!books || books.length === 0) {
+        if (append) return;
         booksList.innerHTML = `<p style="color: var(--text-muted); font-size: 0.95rem;">No materials matching that criteria.</p>`;
         return;
     }
 
-    books.forEach(book => {
-        const card = document.createElement("article");
-        card.className = "card";
+    books.forEach((book, index) => booksList.appendChild(createBookCatalogCard(book, !append && index < 5)));
+};
 
-        card.innerHTML = `
-          <div class="card-img-wrapper">
-            ${window.renderBookCoverPreview(book, book.title + " cover")}
-          </div>
-          <div class="card-content">
-            <p class="book-card-meta">${escapeHtml(book.category || 'Books')} &bull; ${escapeHtml(book.author || 'Admin')}</p>
-            <h3 class="card-title">${escapeHtml(book.title)}</h3>
-            
-            <div class="mebv-meta-row">
-                <span class="mebv-stars">${renderDynamicStars(book.average_rating)}</span>
-                <span class="mebv-counts">${book.downloads_count || 0} DLs</span>
-            </div>
+window.syncBookCatalogCards = function(books) {
+    const booksList = document.getElementById("books-list");
+    if (!booksList) return;
 
-            <div class="mebv-card-footer">
-              <button class="btn btn-outline btn-sm" onclick="openBookDetails('${book.id}')">📖 Details</button>
-              <button class="btn btn-primary btn-sm" onclick="executeQuickDownload(event, '${book.id}')">⬇ Download</button>
-            </div>
-          </div>
-        `;
-        booksList.appendChild(card);
+    const existingCards = new Map(
+      Array.from(booksList.querySelectorAll("[data-book-id]"))
+        .map(card => [card.dataset.bookId, card])
+    );
+    const fragment = document.createDocumentFragment();
+    books.forEach((book, index) => {
+      const existing = existingCards.get(book.id);
+      const card = existing || createBookCatalogCard(book, index < 5);
+      updateBookCatalogCard(card, book, index < 5);
+      fragment.appendChild(card);
     });
+    booksList.replaceChildren(fragment);
+    if (books.length === 0) {
+      booksList.innerHTML = `<p style="color: var(--text-muted); font-size: 0.95rem;">No materials matching that criteria.</p>`;
+    }
 };
 </script>
 <script>
@@ -535,14 +755,11 @@ window.renderBooksList = function(books) {
     }
 
     if (typeof originalList === 'function') {
-        window.renderBooksList = function(books) {
-            originalList(books);
+        window.renderBooksList = function(books, append = false) {
+            originalList(books, append);
             document.querySelectorAll('#books-list .card').forEach((card, index) => {
-                const book = books[index];
-                if(book) {
-                   const countEl = card.querySelector('.mebv-counts');
-                   if(countEl) countEl.setAttribute('data-download-count-for', book.id);
-                }
+                const countEl = card.querySelector('.mebv-counts');
+                if(card.dataset.bookId && countEl) countEl.setAttribute('data-download-count-for', card.dataset.bookId);
             });
         };
     }

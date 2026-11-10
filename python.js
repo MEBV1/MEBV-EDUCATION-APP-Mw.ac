@@ -23,13 +23,6 @@ async function loadLessons() {
       return;
     }
     
-    // Check for welcome modal acceptance
-    if (!localStorage.getItem('mebv_python_welcome_accepted')) {
-      window.hideLoading();
-      showPythonWelcomeModal();
-      return;
-    }
-
     await checkSubscription(session.user.id);
     lessonsList = await fetchLessons();
     
@@ -72,39 +65,6 @@ function showLoginGate() {
     `;
   }
 }
-
-function showPythonWelcomeModal() {
-  const modal = document.createElement('div');
-  modal.className = 'modal-overlay active';
-  modal.id = 'python-welcome-modal';
-  modal.innerHTML = `
-    <div class="modal-box" style="max-width: 550px;">
-      <div class="modal-header">
-        <h2 class="modal-title">Python Academy Information</h2>
-      </div>
-      <div class="modal-body" style="line-height: 1.6;">
-        <p style="margin-bottom: 1rem;"><strong>Welcome to the MEBV Python Academy.</strong></p>
-        <p style="margin-bottom: 1rem;">On this platform you will learn practical Python programming through structured video lessons, exercises, progress tracking, and guided projects.</p>
-        <p style="margin-bottom: 1.5rem;">For theory discussions, notes, announcements, support, and interaction with fellow learners, you must join our official WhatsApp learning community.</p>
-        
-        <div style="display: flex; flex-direction: column; gap: 1rem;">
-          <a href="https://chat.whatsapp.com/J2U1y30ZF1hFdzEITrutDU?mlu=1&s=cl&p=a" target="_blank" class="btn btn-primary btn-block" style="background-color: #25D366; border-color: #25D366; display: flex; align-items: center; justify-content: center; gap: 0.5rem;">
-            <span>Join WhatsApp Group</span>
-          </a>
-          <button class="btn btn-outline btn-block" onclick="acceptPythonWelcome()">Continue Learning</button>
-        </div>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(modal);
-}
-
-window.acceptPythonWelcome = function() {
-  localStorage.setItem('mebv_python_welcome_accepted', 'true');
-  const modal = document.getElementById('python-welcome-modal');
-  if (modal) modal.remove();
-  loadLessons();
-};
 
 async function checkSubscription(userId) {
   try {

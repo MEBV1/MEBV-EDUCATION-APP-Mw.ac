@@ -8,7 +8,7 @@
  * @param {string} category - Category filter values (MSCE Books, JCE Books, etc.)
  * @returns {Array} List of book records matching queries
  */
-async function fetchBooks(searchTerm = "", category = "all") {
+async function fetchBooks(searchTerm = "", category = "all", offset = 0, limit = 50) {
   if (!window.supabaseClient) {
     console.error("Database connection missing");
     return [];
@@ -17,8 +17,10 @@ async function fetchBooks(searchTerm = "", category = "all") {
   try {
     let query = window.supabaseClient
       .from("books")
-      .select("*")
-      .order("created_at", { ascending: false });
+      .select("id,title,author,description,category,cover_url,downloads_count,average_rating,featured,is_active,created_at,updated_at")
+      .eq("is_active", true)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
 
     // Filter by Category if specific value selected
     if (category && category !== "all") {
@@ -53,8 +55,9 @@ async function fetchBookDetails(bookId) {
     // 1) Fetch the book record first (no nested relations)
     const { data: book, error: bookErr } = await window.supabaseClient
       .from("books")
-      .select("*")
+      .select("id,title,author,category,description,pages,publisher,average_rating,cover_url,is_active")
       .eq("id", bookId)
+      .eq("is_active", true)
       .single();
 
     if (bookErr) {
@@ -140,6 +143,19 @@ function getDownloadFilename(response, fallback) {
   return disposition.match(/filename="?([^";]+)"?/i)?.[1] || fallback;
 }
 
+async function hasZipSignature(file) {
+  const bytes = new Uint8Array(await file.slice(0, 64 * 1024).arrayBuffer());
+  const searchEnd = Math.min(bytes.length - 3, 64 * 1024);
+  for (let offset = 0; offset < searchEnd; offset += 1) {
+    if (bytes[offset] === 0x50 && bytes[offset + 1] === 0x4b && (
+      (bytes[offset + 2] === 0x03 && bytes[offset + 3] === 0x04) ||
+      (bytes[offset + 2] === 0x05 && bytes[offset + 3] === 0x06) ||
+      (bytes[offset + 2] === 0x07 && bytes[offset + 3] === 0x08)
+    )) return true;
+  }
+  return false;
+}
+
 async function updateBookDownloadCount(bookId) {
   const { data, error } = await window.supabaseClient
     .from("books")
@@ -185,13 +201,26 @@ async function downloadBookFile(bookId) {
 
     try {
       const response = await postAction("download");
-      if (!response.ok) {
-        const result = await response.json().catch(() => null);
+      const responseType = (response.headers.get("content-type") || "")
+        .split(";")[0]
+        .trim()
+        .toLowerCase();
+      if (!response.ok || responseType === "application/json" || responseType === "text/html") {
+        const responseBody = await response.text().catch(() => "");
+        let result = null;
+        try {
+          result = JSON.parse(responseBody);
+        } catch {
+          // Non-JSON gateway errors should remain visible to the user as text.
+        }
         if (response.status === 429 && result?.code === "FREE_DOWNLOAD_LIMIT_REACHED") {
           window.showAuthModal("download-limit");
           return false;
         }
-        throw new Error(result?.error || `Download failed (HTTP ${response.status}).`);
+        const fallback = response.ok
+          ? "The download service returned an error instead of a file."
+          : `Download failed (HTTP ${response.status}).`;
+        throw new Error(result?.error || responseBody.trim() || fallback);
       }
       reservationMade = true;
       if (response.headers.get("x-download-request-id") !== requestId) {
@@ -200,10 +229,24 @@ async function downloadBookFile(bookId) {
 
       const file = await response.blob();
       if (!file.size) throw new Error("The download service returned an empty file.");
+      const filename = getDownloadFilename(response, `book-${bookId}`);
+      const zipMimeTypes = new Set([
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/x-zip",
+        "multipart/x-zip"
+      ]);
+      const isZipFilename = /\.zip$/i.test(filename);
+      const hasZipSignatureBytes = (isZipFilename || zipMimeTypes.has(responseType) || responseType === "application/octet-stream")
+        ? await hasZipSignature(file)
+        : false;
+      if ((isZipFilename || zipMimeTypes.has(responseType)) && !hasZipSignatureBytes) {
+        throw new Error("The downloaded file is not a valid ZIP archive.");
+      }
       const objectUrl = URL.createObjectURL(file);
       const link = document.createElement("a");
       link.href = objectUrl;
-      link.download = getDownloadFilename(response, `book-${bookId}`);
+      link.download = filename;
       link.hidden = true;
       document.body.appendChild(link);
       link.click();
@@ -246,13 +289,11 @@ async function downloadBookFile(bookId) {
     return false;
   } finally {
     activeBookDownloads.delete(bookId);
-    window.dispatchEvent(new CustomEvent("mebv:book-download-settled"));
   }
 }
 
 window.downloadBookFile = downloadBookFile;
 window.trackDownload = (bookId) => downloadBookFile(bookId);
-window.hasActiveBookDownload = () => activeBookDownloads.size > 0;
 
 /**
  * Submit user assessment/review details for a curriculum book
@@ -365,7 +406,7 @@ function escapeBookPreviewText(value) {
 }
 
 window.renderBookCoverPreview = function(book, alt, variant = "card") {
-  const isCard = variant === "card";
+  const isCard = variant === "card" || variant === "featured" || variant === "first-visible";
   const className = isCard ? "card-img book-cover-image" : "book-cover-modal-image";
   const statusClass = isCard ? "book-preview-status book-preview-status--card" : "book-preview-status book-preview-status--modal";
   const style = isCard ? "" : ' style="width:120px;aspect-ratio:3/4;object-fit:contain;background:var(--bg-tertiary);border-radius:var(--border-radius-md);"';
@@ -373,11 +414,13 @@ window.renderBookCoverPreview = function(book, alt, variant = "card") {
   if (!coverUrl) {
     return `<div class="${statusClass}" role="status"${style}>${escapeBookPreviewText(getBookPreviewStatus(book))}</div>`;
   }
-  return `<img src="${coverUrl}" alt="${escapeBookPreviewText(alt)}" class="${className}" data-preview-variant="${variant}" onerror="window.handleBookCoverPreviewError(this)"${style}>`;
+  const eager = variant === "featured" || variant === "first-visible" || variant === "modal";
+  const dimensions = isCard ? ' width="900" height="1273"' : ' width="120" height="160"';
+  return `<img src="${coverUrl}" alt="${escapeBookPreviewText(alt)}" class="${className}" data-preview-variant="${variant}" loading="${eager ? "eager" : "lazy"}" decoding="async"${eager ? ' fetchpriority="high"' : ""}${dimensions} onerror="window.handleBookCoverPreviewError(this)"${style}>`;
 };
 
 window.handleBookCoverPreviewError = function(image) {
-  const isCard = image.dataset.previewVariant === "card";
+  const isCard = ["card", "featured", "first-visible"].includes(image.dataset.previewVariant);
   const fallback = document.createElement("div");
   fallback.className = isCard ? "book-preview-status book-preview-status--card" : "book-preview-status book-preview-status--modal";
   fallback.setAttribute("role", "status");

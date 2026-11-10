@@ -2,6 +2,7 @@
 // Service catalogue and inquiry form functionality
 
 let servicesCatalog = [];
+let serviceRequestPending = false;
 
 window.loadServices = async function() {
   window.showLoading("Loading service catalogue...");
@@ -25,7 +26,7 @@ async function fetchServices() {
   try {
     const { data, error } = await window.supabaseClient
       .from("services")
-      .select("*")
+      .select("id,name,category,description,price,views_count,created_at")
       .order("created_at", { ascending: true });
     if (error) throw error;
     return data || [];
@@ -105,6 +106,7 @@ async function trackServiceView(serviceId) {
 
 async function submitServiceRequest(event) {
   event.preventDefault();
+  if (serviceRequestPending) return;
   const name = document.getElementById("service-name").value.trim();
   const email = document.getElementById("service-email").value.trim();
   const service = document.getElementById("service-choice").value;
@@ -115,6 +117,9 @@ async function submitServiceRequest(event) {
     return;
   }
 
+  serviceRequestPending = true;
+  const submitButton = document.querySelector("#service-request-form [type=submit]");
+  if (submitButton) submitButton.disabled = true;
   window.showLoading("Submitting your request...");
   try {
     if (window.supabaseClient) {
@@ -129,6 +134,8 @@ async function submitServiceRequest(event) {
     console.error("Service request failed:", error);
     window.showError("Unable to submit request now. Please try again later.");
   } finally {
+    serviceRequestPending = false;
+    if (submitButton) submitButton.disabled = false;
     window.hideLoading();
   }
 }

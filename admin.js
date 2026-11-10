@@ -21,6 +21,9 @@ window.addEventListener("DOMContentLoaded", initAdminDashboard);
 
 let adminAuthStateListenerRegistered = false;
 let currentAdminRole = null;
+const adminBooksPageSize = 50;
+let adminBooksPageOffset = 0;
+let adminBooksTotalCount = 0;
 
 function logAdminSession(session, label = "Session check") {
     console.info("[AUTH DEBUG] " + label, {
@@ -379,7 +382,14 @@ async function loadSectionData(section) {
     window.showLoading("Loading data...");
     try {
         if (section === "books") {
-            const { data: records } = await window.supabaseClient.from("books").select("*").order("created_at", { ascending: false });
+            const { data: records, count, error } = await window.supabaseClient
+                .from("books")
+                .select("id,title,category,cover_url", { count: "exact" })
+                .order("created_at", { ascending: false })
+                .order("id", { ascending: true })
+                .range(adminBooksPageOffset, adminBooksPageOffset + adminBooksPageSize - 1);
+            if (error) throw error;
+            adminBooksTotalCount = count || 0;
             let content = `
                 <div class="card" style="padding:1.5rem; margin-bottom:1.5rem; display:flex; justify-content:space-between; align-items:center;">
                     <h2 class="card-title">Curriculum Materials</h2>
@@ -394,19 +404,29 @@ async function loadSectionData(section) {
                         <td style="display:flex; align-items:center; gap:10px;">
                                 ${adminBookCoverPreview(r)
                                   ? `<img src="${adminBookCoverPreview(r)}" alt="Book first-page preview"
+                                     loading="lazy" decoding="async" width="30" height="45"
                                      style="width:30px; height:45px; border-radius:3px; object-fit:contain; background:var(--bg-tertiary); border:1px solid var(--border-color);"
                                      onerror="window.handleAdminBookPreviewError(this)">`
                               : `<span title="${escapeHtml(adminBookPreviewStatus(r))}" style="font-size:.7rem;color:var(--muted-text,#666);">${escapeHtml(adminBookPreviewStatus(r))}</span>`}
                             <span>${escapeHtml(r.title)}</span>
                         </td>
-                        <td>${r.category}</td>
+                        <td>${escapeHtml(r.category)}</td>
                         <td style="white-space:nowrap;">
-                            <button class="btn btn-outline btn-sm" onclick="regenBookThumbnail('${r.id}','${r.download_url}')">🔄 Sync Cover</button>
+                            <button class="btn btn-outline btn-sm" onclick="regenBookThumbnail('${r.id}')">🔄 Sync Cover</button>
                             <button class="btn btn-accent btn-sm" onclick="deleteAdminRecord('books','${r.id}')">Delete</button>
                         </td>
                     </tr>`).join("");
                 content += `<div class="admin-table-wrapper"><table class="admin-table"><thead><tr><th>Material</th><th>Level</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`;
             } else { content += "<p>Library is empty.</p>"; }
+            const pageNumber = Math.floor(adminBooksPageOffset / adminBooksPageSize) + 1;
+            const hasPreviousPage = adminBooksPageOffset > 0;
+            const hasNextPage = adminBooksPageOffset + (records || []).length < adminBooksTotalCount;
+            content += `
+                <div style="display:flex;align-items:center;justify-content:center;gap:1rem;margin-top:1rem;">
+                    <button class="btn btn-outline btn-sm" type="button" onclick="loadAdminBooksPage(${Math.max(0, adminBooksPageOffset - adminBooksPageSize)})" ${hasPreviousPage ? "" : "disabled"}>Previous</button>
+                    <span>Page ${pageNumber} of ${Math.max(1, Math.ceil(adminBooksTotalCount / adminBooksPageSize))} (${adminBooksTotalCount} books)</span>
+                    <button class="btn btn-outline btn-sm" type="button" onclick="loadAdminBooksPage(${adminBooksPageOffset + adminBooksPageSize})" ${hasNextPage ? "" : "disabled"}>Next</button>
+                </div>`;
             main.innerHTML = content;
         } else {
             // Existing logic for other tables
@@ -417,6 +437,20 @@ async function loadSectionData(section) {
 
     } finally { window.hideLoading(); }
 }
+
+window.loadAdminBooksPage = async function(offset) {
+    const previousOffset = adminBooksPageOffset;
+    adminBooksPageOffset = Math.max(0, Number(offset) || 0);
+    window.showLoading("Loading books...");
+    try {
+        await loadSectionData("books");
+    } catch (error) {
+        adminBooksPageOffset = previousOffset;
+        window.showError("Could not load the books page: " + (error.message || "unknown error"));
+    } finally {
+        window.hideLoading();
+    }
+};
 
 function renderPushAnnouncementForm(main) {
     main.innerHTML = `
@@ -1290,7 +1324,7 @@ async function handleMasterSubmission(type, formData) {
                 <div style="border:1px solid var(--border-color); border-radius:12px; padding:1rem; display:grid; gap:.75rem; background:rgba(255,255,255,.02);">
                     <div style="display:flex; gap:1rem; align-items:center;">
                         ${cover
-                          ? `<img src="${escapeHtml(cover)}" alt="First-page preview" style="width:60px;height:88px;object-fit:contain;background:var(--bg-tertiary);border-radius:10px;border:1px solid var(--border-color);" onerror="this.onerror=null;this.replaceWith(document.createTextNode('Saved cover image could not be loaded.'))">`
+                          ? `<img src="${escapeHtml(cover)}" alt="First-page preview" loading="lazy" decoding="async" width="60" height="88" style="width:60px;height:88px;object-fit:contain;background:var(--bg-tertiary);border-radius:10px;border:1px solid var(--border-color);" onerror="this.onerror=null;this.replaceWith(document.createTextNode('Saved cover image could not be loaded.'))">`
                           : `<div style="width:60px;height:88px;display:grid;place-items:center;text-align:center;font-size:.65rem;color:var(--muted-text,#666);background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:10px;">Preview generated after saving</div>`}
                         <div style="flex:1; min-width:0;">
                             <div style="font-weight:700; margin-bottom:.25rem;">${title}</div>

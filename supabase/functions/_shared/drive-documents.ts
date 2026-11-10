@@ -2,6 +2,7 @@ export type SupportedDocumentExtension =
   | "pdf" | "doc" | "docx" | "ppt" | "pptx" | "xls" | "xlsx"
   | "odt" | "ods" | "odp" | "epub" | "txt" | "rtf"
   | "jpg" | "jpeg" | "png" | "webp" | "gif"
+  | "zip"
   | "gdoc" | "gslides" | "gsheets";
 
 export interface DriveDocument {
@@ -10,6 +11,8 @@ export interface DriveDocument {
   mimeType: string;
   size: number;
   webViewLink: string;
+  modifiedTime?: string;
+  md5Checksum?: string;
 }
 
 export interface RenderedDocument {
@@ -50,6 +53,7 @@ const supportedMimeByExtension: Record<SupportedDocumentExtension, string[]> = {
   png: ["image/png"],
   webp: ["image/webp"],
   gif: ["image/gif"],
+  zip: ["application/zip", "application/x-zip-compressed", "application/x-zip", "multipart/x-zip"],
   gdoc: ["application/vnd.google-apps.document"],
   gslides: ["application/vnd.google-apps.presentation"],
   gsheets: ["application/vnd.google-apps.spreadsheet"]
@@ -67,19 +71,36 @@ export function documentMimeForExtension(extension: SupportedDocumentExtension) 
   return supportedMimeByExtension[extension][0];
 }
 
+export function hasZipSignature(bytes: Uint8Array) {
+  const searchEnd = Math.min(bytes.length - 3, 64 * 1024);
+  for (let offset = 0; offset < searchEnd; offset += 1) {
+    if (bytes[offset] === 0x50 && bytes[offset + 1] === 0x4b && (
+      (bytes[offset + 2] === 0x03 && bytes[offset + 3] === 0x04) ||
+      (bytes[offset + 2] === 0x05 && bytes[offset + 3] === 0x06) ||
+      (bytes[offset + 2] === 0x07 && bytes[offset + 3] === 0x08)
+    )) return true;
+  }
+  return false;
+}
+
 export function classifyDocument(name: string, mimeType: string): DocumentClassification {
   const extension = (name.match(/\.([a-z0-9]+)$/i)?.[1] || "").toLowerCase() as SupportedDocumentExtension;
   const normalizedMime = String(mimeType || "").split(";")[0].trim().toLowerCase();
   const mimeExtension = (Object.entries(supportedMimeByExtension)
     .find(([, supportedMimes]) => supportedMimes.includes(normalizedMime))?.[0] || "") as SupportedDocumentExtension | "";
   const isGoogleWorkspaceFile = mimeExtension === "gdoc" || mimeExtension === "gslides" || mimeExtension === "gsheets";
-  const resolvedExtension = isGoogleWorkspaceFile ? mimeExtension : extension || mimeExtension;
+  const isZipMime = mimeExtension === "zip";
+  const resolvedExtension = isGoogleWorkspaceFile
+    ? mimeExtension
+    : isZipMime
+    ? "zip"
+    : extension || mimeExtension || (!extension && normalizedMime === "application/octet-stream" ? "zip" : "");
 
   if (!resolvedExtension || !supportedMimeByExtension[resolvedExtension]) {
     return { supported: false, extension: resolvedExtension, reason: `Unsupported format: ${normalizedMime || extension || "unknown MIME type"}` };
   }
 
-  if (normalizedMime && normalizedMime !== "application/octet-stream" &&
+  if (resolvedExtension !== "zip" && normalizedMime && normalizedMime !== "application/octet-stream" &&
     !supportedMimeByExtension[resolvedExtension].includes(normalizedMime)) {
     return {
       supported: false,
@@ -91,10 +112,19 @@ export function classifyDocument(name: string, mimeType: string): DocumentClassi
   return { supported: true, extension: resolvedExtension, reason: "" };
 }
 
-export async function getDriveDocument(fileId: string, apiKey: string): Promise<DriveDocument> {
+export async function getDriveDocument(
+  fileId: string,
+  apiKey: string,
+  includePreviewVersion = false
+): Promise<DriveDocument> {
   const url = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`);
   url.searchParams.set("key", apiKey);
-  url.searchParams.set("fields", "id,name,mimeType,size,webViewLink");
+  url.searchParams.set(
+    "fields",
+    includePreviewVersion
+      ? "id,name,mimeType,size,webViewLink,modifiedTime,md5Checksum"
+      : "id,name,mimeType,size,webViewLink"
+  );
   url.searchParams.set("supportsAllDrives", "true");
 
   let response: Response;
@@ -121,7 +151,9 @@ export async function getDriveDocument(fileId: string, apiKey: string): Promise<
     name: String(file.name || ""),
     mimeType: String(file.mimeType || "application/octet-stream").toLowerCase(),
     size: Number(file.size) || 0,
-    webViewLink: String(file.webViewLink || `https://drive.google.com/file/d/${encodeURIComponent(fileId)}/view`)
+    webViewLink: String(file.webViewLink || `https://drive.google.com/file/d/${encodeURIComponent(fileId)}/view`),
+    modifiedTime: typeof file.modifiedTime === "string" ? file.modifiedTime : undefined,
+    md5Checksum: typeof file.md5Checksum === "string" ? file.md5Checksum : undefined
   };
 }
 
@@ -207,8 +239,8 @@ export async function renderDocument(
   if (typeof payload?.cover_base64 !== "string" || !payload.cover_base64) {
     throw new DocumentRendererError(502, "Document renderer returned no first-page image.");
   }
-  if (payload.cover_base64.length > 14 * 1024 * 1024) {
-    throw new DocumentRendererError(502, "Generated first-page image exceeds the processing limit.");
+  if (payload.cover_base64.length > 6 * 1024 * 1024) {
+    throw new DocumentRendererError(502, "Generated first-page image exceeds the 4 MB storage limit.");
   }
 
   const coverMimeType = payload.cover_mime_type;
